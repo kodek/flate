@@ -104,11 +104,11 @@ func Run(left, right []Doc, opts Options) ([]ResourceDiff, error) {
 	pairs := pair(left, right)
 	out := make([]ResourceDiff, 0, len(pairs))
 	for _, p := range pairs {
-		a, err := yaml.Marshal(p.a)
+		a, err := marshalSide(p.a)
 		if err != nil {
 			return nil, err
 		}
-		b, err := yaml.Marshal(p.b)
+		b, err := marshalSide(p.b)
 		if err != nil {
 			return nil, err
 		}
@@ -261,6 +261,25 @@ func deepCopyValue(v any) any {
 	default:
 		return v
 	}
+}
+
+// marshalSide serializes one side of a paired manifest. A nil manifest
+// (added or deleted between baseline and current) yields an empty
+// byte slice, not "null\n", so the diff body never contains a
+// "+null" / "-null" line. Non-nil manifests are prefixed with the YAML
+// document separator to match flux-local's output.
+func marshalSide(m map[string]any) ([]byte, error) {
+	if m == nil {
+		return nil, nil
+	}
+	body, err := yaml.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(body)+4)
+	out = append(out, "---\n"...)
+	out = append(out, body...)
+	return out, nil
 }
 
 func unified(a, b string, context int) (string, error) {

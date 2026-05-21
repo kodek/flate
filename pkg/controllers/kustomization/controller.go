@@ -39,10 +39,12 @@ type Controller struct {
 	WipeSecrets bool
 
 	unsub []store.Unsubscribe
+	coal  *task.Coalescer[manifest.NamedResource]
 }
 
 // Start registers the listener that drives reconciliation.
 func (c *Controller) Start(ctx context.Context) {
+	c.coal = task.NewCoalescer[manifest.NamedResource](c.Tasks)
 	c.unsub = append(c.unsub,
 		c.Store.AddListener(store.EventObjectAdded, c.onObjectAdded(ctx), true),
 	)
@@ -61,15 +63,21 @@ func (c *Controller) onObjectAdded(ctx context.Context) store.Listener {
 		if id.Kind != manifest.KindKustomization {
 			return
 		}
-		ks, ok := payload.(*manifest.Kustomization)
-		if !ok {
+		if _, ok := payload.(*manifest.Kustomization); !ok {
 			return
 		}
 		if c.Filter.Enabled() && !c.Filter.ShouldReconcile(id) {
 			c.Store.UpdateStatus(id, store.StatusReady, "unchanged")
 			return
 		}
-		c.Tasks.Go(ctx, "kustomization/"+id.String(), func(ctx context.Context) {
+		c.coal.Submit(ctx, "kustomization/"+id.String(), id, func(ctx context.Context) {
+			// Re-read the spec each iteration so a coalesced re-run
+			// picks up patches a parent KS installed mid-flight rather
+			// than the stale payload from the original event.
+			ks, _ := c.Store.GetObject(id).(*manifest.Kustomization)
+			if ks == nil {
+				return
+			}
 			if err := c.reconcile(ctx, ks); err != nil {
 				c.Store.UpdateStatus(id, store.StatusFailed, err.Error())
 				return

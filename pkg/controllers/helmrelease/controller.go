@@ -39,10 +39,12 @@ type Controller struct {
 	WipeSecrets bool
 
 	unsub []store.Unsubscribe
+	coal  *task.Coalescer[manifest.NamedResource]
 }
 
 // Start registers the listeners. The controller runs until Close.
 func (c *Controller) Start(ctx context.Context) {
+	c.coal = task.NewCoalescer[manifest.NamedResource](c.Tasks)
 	c.unsub = append(c.unsub,
 		c.Store.AddListener(store.EventObjectAdded, c.onObjectAdded(ctx), true),
 		c.Store.AddListener(store.EventArtifactUpdated, c.onArtifactUpdated, true),
@@ -69,15 +71,20 @@ func (c *Controller) onObjectAdded(ctx context.Context) store.Listener {
 				c.Helm.AddOCIRepo(r)
 			}
 		case manifest.KindHelmRelease:
-			hr, ok := payload.(*manifest.HelmRelease)
-			if !ok {
+			if _, ok := payload.(*manifest.HelmRelease); !ok {
 				return
 			}
 			if c.Filter.Enabled() && !c.Filter.ShouldReconcile(id) {
 				c.Store.UpdateStatus(id, store.StatusReady, "unchanged")
 				return
 			}
-			c.Tasks.Go(ctx, "helmrelease/"+id.String(), func(ctx context.Context) {
+			c.coal.Submit(ctx, "helmrelease/"+id.String(), id, func(ctx context.Context) {
+				// Re-read each iteration so a coalesced re-run picks up
+				// a parent KS's patches rather than the stale payload.
+				hr, _ := c.Store.GetObject(id).(*manifest.HelmRelease)
+				if hr == nil {
+					return
+				}
 				if err := c.reconcile(ctx, hr); err != nil {
 					c.Store.UpdateStatus(id, store.StatusFailed, err.Error())
 					return

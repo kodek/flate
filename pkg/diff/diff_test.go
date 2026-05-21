@@ -56,6 +56,42 @@ func TestRun_AddedAndRemoved(t *testing.T) {
 	}
 }
 
+func TestRun_DeletionHasNoNullCounterpart(t *testing.T) {
+	left := []Doc{cm("a", "ns", "owner", "v1")}
+	diffs, err := Run(left, nil, Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(diffs) != 1 {
+		t.Fatalf("expected 1 diff for deletion, got %d", len(diffs))
+	}
+	body := diffs[0].Diff
+	if strings.Contains(body, "+null") {
+		t.Errorf("deletion diff contained spurious +null line:\n%s", body)
+	}
+	if !strings.Contains(body, "----\n") {
+		t.Errorf("expected '---' YAML document separator in removed body:\n%s", body)
+	}
+}
+
+func TestRun_AdditionHasNoNullCounterpart(t *testing.T) {
+	right := []Doc{cm("a", "ns", "owner", "v1")}
+	diffs, err := Run(nil, right, Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(diffs) != 1 {
+		t.Fatalf("expected 1 diff for addition, got %d", len(diffs))
+	}
+	body := diffs[0].Diff
+	if strings.Contains(body, "-null") {
+		t.Errorf("addition diff contained spurious -null line:\n%s", body)
+	}
+	if !strings.Contains(body, "+---\n") {
+		t.Errorf("expected '---' YAML document separator in added body:\n%s", body)
+	}
+}
+
 func TestFormat_JSON(t *testing.T) {
 	diffs := []ResourceDiff{{Kind: "ConfigMap", Name: "a", Diff: "..."}}
 	out, err := Render(diffs, FormatJSON)

@@ -55,6 +55,76 @@ func TestService_PanicCountedAndRecovered(t *testing.T) {
 	}
 }
 
+func TestCoalescer_SerializesPerKey(t *testing.T) {
+	s := New()
+	c := NewCoalescer[string](s)
+
+	var concurrent atomic.Int32
+	var maxConcurrent atomic.Int32
+	var runs atomic.Int64
+	gate := make(chan struct{})
+
+	bumpPeak := func() {
+		now := concurrent.Add(1)
+		for {
+			peak := maxConcurrent.Load()
+			if now <= peak || maxConcurrent.CompareAndSwap(peak, now) {
+				return
+			}
+		}
+	}
+
+	c.Submit(context.Background(), "k", "k", func(_ context.Context) {
+		bumpPeak()
+		runs.Add(1)
+		<-gate
+		concurrent.Add(-1)
+	})
+	for range 5 {
+		c.Submit(context.Background(), "k", "k", func(_ context.Context) {
+			bumpPeak()
+			runs.Add(1)
+			concurrent.Add(-1)
+		})
+	}
+
+	close(gate)
+	s.BlockTillDone()
+
+	if got := runs.Load(); got != 2 {
+		t.Errorf("expected exactly 2 runs (initial + 1 coalesced re-run), got %d", got)
+	}
+	if peak := maxConcurrent.Load(); peak > 1 {
+		t.Errorf("Coalescer permitted %d concurrent runs for same key; must be 1", peak)
+	}
+}
+
+func TestCoalescer_DistinctKeysRunConcurrently(t *testing.T) {
+	s := New()
+	c := NewCoalescer[string](s)
+
+	bothStarted := make(chan struct{}, 2)
+	release := make(chan struct{})
+
+	for _, k := range []string{"a", "b"} {
+		c.Submit(context.Background(), k, k, func(_ context.Context) {
+			bothStarted <- struct{}{}
+			<-release
+		})
+	}
+
+	deadline := time.After(2 * time.Second)
+	for range 2 {
+		select {
+		case <-bothStarted:
+		case <-deadline:
+			t.Fatal("distinct keys did not run concurrently")
+		}
+	}
+	close(release)
+	s.BlockTillDone()
+}
+
 func TestService_ActiveNames(t *testing.T) {
 	s := New()
 	gate := make(chan struct{})

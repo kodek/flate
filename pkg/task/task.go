@@ -120,3 +120,55 @@ func (s *Service) BlockTillAllDone() {
 	s.wgActive.Wait()
 	s.wgBack.Wait()
 }
+
+// Coalescer keeps at most one task per key in flight; submits that
+// arrive while a key is running collapse into a single re-run after it
+// returns. fn must re-read its inputs each call — a coalesced re-run
+// exists precisely because the previous submit's inputs went stale.
+type Coalescer[K comparable] struct {
+	svc  *Service
+	mu   sync.Mutex
+	slot map[K]*coalSlot
+}
+
+type coalSlot struct {
+	running bool
+	pending bool
+}
+
+// NewCoalescer constructs a Coalescer that schedules work onto svc.
+func NewCoalescer[K comparable](svc *Service) *Coalescer[K] {
+	return &Coalescer[K]{svc: svc, slot: make(map[K]*coalSlot)}
+}
+
+// Submit schedules fn for key, starting a new active task if key is
+// idle or marking the running slot pending otherwise.
+func (c *Coalescer[K]) Submit(ctx context.Context, name string, key K, fn func(context.Context)) {
+	c.mu.Lock()
+	s := c.slot[key]
+	if s == nil {
+		s = &coalSlot{}
+		c.slot[key] = s
+	}
+	if s.running {
+		s.pending = true
+		c.mu.Unlock()
+		return
+	}
+	s.running = true
+	c.mu.Unlock()
+
+	c.svc.Go(ctx, name, func(ctx context.Context) {
+		for {
+			fn(ctx)
+			c.mu.Lock()
+			if !s.pending {
+				s.running = false
+				c.mu.Unlock()
+				return
+			}
+			s.pending = false
+			c.mu.Unlock()
+		}
+	})
+}
