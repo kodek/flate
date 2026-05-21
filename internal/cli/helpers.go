@@ -2,10 +2,15 @@ package cli
 
 import (
 	"cmp"
+	"context"
+	"errors"
+	"io"
 	"slices"
 	"strings"
 
+	"github.com/home-operations/flate/internal/format"
 	"github.com/home-operations/flate/pkg/diff"
+	"github.com/home-operations/flate/pkg/image"
 	"github.com/home-operations/flate/pkg/manifest"
 	"github.com/home-operations/flate/pkg/orchestrator"
 	"github.com/home-operations/flate/pkg/store"
@@ -28,6 +33,75 @@ func sortRows(rows []map[string]string) {
 		}
 		return cmp.Compare(a["name"], b["name"])
 	})
+}
+
+// collectImages returns the union of container images found in every
+// rendered Kustomization and HelmRelease artifact reachable from the
+// store — Deployments, StatefulSets, Pods, Jobs, and anything else
+// `image.Extract` can recognise. The namespace scope on c is honored:
+// resources whose parent is out of scope contribute nothing.
+func collectImages(o *orchestrator.Orchestrator, c *commonFlags) map[string]struct{} {
+	set := map[string]struct{}{}
+	add := func(docs []map[string]any) {
+		for _, doc := range docs {
+			imgs, _ := image.Extract(doc)
+			for _, img := range imgs {
+				set[img] = struct{}{}
+			}
+		}
+	}
+	for _, kind := range []string{manifest.KindKustomization, manifest.KindHelmRelease} {
+		for _, obj := range o.Store().ListObjects(kind) {
+			id := obj.Named()
+			if !c.includeNamespace(o.Filter(), id.Namespace) {
+				continue
+			}
+			switch art := o.Store().GetArtifact(id).(type) {
+			case *store.KustomizationArtifact:
+				add(art.Manifests)
+			case *store.HelmReleaseArtifact:
+				add(art.Manifests)
+			}
+		}
+	}
+	return set
+}
+
+// emitImageList writes a sorted image list in the requested format.
+// Non-structured outputs fall back to one image per line.
+func emitImageList(w io.Writer, imgs []string, out string) error {
+	switch format.Output(out) {
+	case format.OutputJSON:
+		return format.JSON(w, imgs)
+	case format.OutputYAML:
+		return format.YAML(w, imgs)
+	}
+	for _, img := range imgs {
+		if _, err := io.WriteString(w, img+"\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runDiffOrchestrators boots two orchestrators in changed-only mode,
+// each treating the other as baseline. Both sides resolve the same
+// (symmetric) change set, so reconciliation is restricted to resources
+// that differ between paths.
+func runDiffOrchestrators(ctx context.Context, c *commonFlags, h *helmFlags) (orig, current *orchestrator.Orchestrator, err error) {
+	if c.pathOrig == "" {
+		return nil, nil, errors.New("diff requires --path-orig")
+	}
+	currentCfg := buildOrchCfg(*c, *h)
+	if current, err = runOrchestratorCfg(ctx, currentCfg); err != nil && current == nil {
+		return nil, nil, err
+	}
+	origCfg := currentCfg
+	origCfg.Path, origCfg.PathOrig = c.pathOrig, c.path
+	if orig, err = runOrchestratorCfg(ctx, origCfg); err != nil && orig == nil {
+		return nil, nil, err
+	}
+	return orig, current, nil
 }
 
 // gatherArtifacts collects every rendered manifest produced by the

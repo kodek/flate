@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"errors"
+	"slices"
 
 	"github.com/spf13/cobra"
 
@@ -14,7 +14,7 @@ func newDiffCmd() *cobra.Command {
 		Use:   "diff",
 		Short: "Diff rendered output against a previous revision",
 	}
-	cmd.AddCommand(newDiffKSCmd(), newDiffHRCmd())
+	cmd.AddCommand(newDiffKSCmd(), newDiffHRCmd(), newDiffImagesCmd())
 	return cmd
 }
 
@@ -68,31 +68,67 @@ func newDiffHRCmd() *cobra.Command {
 	return cmd
 }
 
+func newDiffImagesCmd() *cobra.Command {
+	c := &commonFlags{}
+	h := &helmFlags{}
+	var includeRemoved bool
+	cmd := &cobra.Command{
+		Use:   "images",
+		Short: "Diff container images between current and baseline",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runDiffImages(cmd, c, h, includeRemoved)
+		},
+	}
+	bindCommon(cmd.Flags(), c)
+	bindHelmFlags(cmd.Flags(), h)
+	cmd.Flags().BoolVar(&includeRemoved, "include-removed", false,
+		"also emit images present only in --path-orig (default: only newly added images)")
+	return cmd
+}
+
+func runDiffImages(cmd *cobra.Command, c *commonFlags, h *helmFlags, includeRemoved bool) error {
+	orig, current, err := runDiffOrchestrators(cmdContext(cmd), c, h)
+	if err != nil {
+		return err
+	}
+	imgs := imageSetDiff(collectImages(orig, c), collectImages(current, c), includeRemoved)
+
+	w, closeFn, err := c.resolveWriter(cmd.OutOrStdout())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = closeFn() }()
+	return emitImageList(w, imgs, c.output)
+}
+
+// imageSetDiff returns the sorted images that differ between orig and
+// current. Images added in current are always included; when
+// includeRemoved is set, images dropped from orig are added too.
+func imageSetDiff(orig, current map[string]struct{}, includeRemoved bool) []string {
+	out := make([]string, 0, len(current))
+	for img := range current {
+		if _, ok := orig[img]; !ok {
+			out = append(out, img)
+		}
+	}
+	if includeRemoved {
+		for img := range orig {
+			if _, ok := current[img]; !ok {
+				out = append(out, img)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 func runDiff(cmd *cobra.Command, c *commonFlags, h *helmFlags, d *diffFlags, kind, name string) error {
-	if c.pathOrig == "" {
-		return errors.New("diff requires --path-orig")
-	}
-
-	// Run two orchestrators — current and baseline — each in
-	// changed-only mode against the other. Both sides compute the
-	// same change set (it's symmetric) and only render the resources
-	// that differ.
-	ctx := cmdContext(cmd)
-	currentCfg := buildOrchCfg(*c, *h)
-	currentOrch, err := runOrchestratorCfg(ctx, currentCfg)
-	if err != nil && currentOrch == nil {
+	orig, current, err := runDiffOrchestrators(cmdContext(cmd), c, h)
+	if err != nil {
 		return err
 	}
-
-	origCfg := currentCfg
-	origCfg.Path, origCfg.PathOrig = c.pathOrig, c.path
-	origOrch, err := runOrchestratorCfg(ctx, origCfg)
-	if err != nil && origOrch == nil {
-		return err
-	}
-
-	origDocs := gatherArtifacts(origOrch, kind, name, c)
-	currentDocs := gatherArtifacts(currentOrch, kind, name, c)
+	origDocs := gatherArtifacts(orig, kind, name, c)
+	currentDocs := gatherArtifacts(current, kind, name, c)
 
 	outFormat := c.output
 	if outFormat == "table" {

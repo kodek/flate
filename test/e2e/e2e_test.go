@@ -27,6 +27,19 @@ func runCLI(t *testing.T, args ...string) string {
 	return stdout.String() + stderr.String()
 }
 
+// runCLIStdout is like runCLI but returns stdout only, so tests can
+// parse the payload without log lines mixed in.
+func runCLIStdout(t *testing.T, args ...string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(args, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("flate %s exited %d\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), code, stdout.String(), stderr.String())
+	}
+	return stdout.String()
+}
+
 func runCLIExpectErr(t *testing.T, args ...string) (string, int) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
@@ -123,6 +136,25 @@ func TestE2E_DiffNoChange(t *testing.T) {
 	if strings.Contains(out, "---") && strings.Contains(out, "+++") &&
 		strings.Contains(out, "@@") {
 		t.Errorf("unexpected diff content for identical paths:\n%s", out)
+	}
+}
+
+func TestE2E_DiffImagesNoChange(t *testing.T) {
+	p := testdataPath(t, "simple")
+	out := runCLIStdout(t, "diff", "images", "--path", p, "--path-orig", p, "-o", "json")
+	got := strings.TrimSpace(out)
+	if got != "[]" && got != "null" {
+		t.Errorf("expected empty image diff for identical paths, got: %q", got)
+	}
+}
+
+func TestE2E_DiffImagesRequiresPathOrig(t *testing.T) {
+	out, code := runCLIExpectErr(t, "diff", "images", "--path", testdataPath(t, "simple"))
+	if code == 0 {
+		t.Fatalf("expected non-zero exit when --path-orig is missing, got 0:\n%s", out)
+	}
+	if !strings.Contains(out, "--path-orig") {
+		t.Errorf("error should mention --path-orig:\n%s", out)
 	}
 }
 
