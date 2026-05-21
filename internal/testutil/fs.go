@@ -13,10 +13,10 @@ import (
 func WriteFile(t *testing.T, root, rel, body string) {
 	t.Helper()
 	p := filepath.Join(root, rel)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
 	}
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatalf("write %s: %v", p, err)
 	}
 }

@@ -24,9 +24,9 @@ type Cache struct {
 }
 
 // NewCache constructs a Cache rooted at dir. If dir is empty, a
-// fluxrr-cache subdirectory under os.TempDir() is used.
+// flate-cache subdirectory under os.TempDir() is used.
 func NewCache(dir string) *Cache {
-	return &Cache{root: cmp.Or(dir, filepath.Join(os.TempDir(), "fluxrr-cache"))}
+	return &Cache{root: cmp.Or(dir, filepath.Join(os.TempDir(), "flate-cache"))}
 }
 
 // Root returns the cache root directory.
@@ -50,15 +50,15 @@ func (c *Cache) Slot(url, ref string) (path string, exists bool, err error) {
 		// Non-empty directory counts as populated. We use the presence
 		// of any entry as the indicator so a bare `mkdir` from a prior
 		// aborted run doesn't masquerade as a hit.
-		f, err := os.Open(path)
+		f, err := os.Open(path) //nolint:gosec // path is a cache slot under our cache root
 		if err == nil {
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 			entries, _ := f.Readdirnames(1)
 			exists = len(entries) > 0
 		}
 		return path, exists, nil
 	case os.IsNotExist(statErr):
-		return path, false, os.MkdirAll(path, 0o755)
+		return path, false, os.MkdirAll(path, 0o750)
 	default:
 		return "", false, fmt.Errorf("cache slot stat: %w", statErr)
 	}

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 func newCM(name, ns string) *manifest.ConfigMap {
@@ -243,7 +243,7 @@ func TestStore_ListenerPanicIsolated(t *testing.T) {
 	}
 }
 
-func TestStore_Concurrency(t *testing.T) {
+func TestStore_Concurrency(_ *testing.T) {
 	s := New()
 	const N = 200
 

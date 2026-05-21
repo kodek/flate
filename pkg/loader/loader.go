@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // Options tunes the ResourceLoader.
@@ -97,11 +97,11 @@ func (l *Loader) Load(root string) (int, error) {
 }
 
 func (l *Loader) loadFile(path string) (int, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is a tree-walk result under the cluster scan root
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	docs, err := manifest.DecodeDocs(f)
 	if err != nil {
 		return 0, fmt.Errorf("decode %s: %w", path, err)

@@ -6,10 +6,10 @@ RUN apk add --no-cache ca-certificates upx
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/fluxrr ./cmd/fluxrr
-RUN upx --best --lzma /out/fluxrr
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/flate ./cmd/flate
+RUN upx --best --lzma /out/flate
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/fluxrr /fluxrr
-ENTRYPOINT ["/fluxrr"]
+COPY --from=build /out/flate /flate
+ENTRYPOINT ["/flate"]

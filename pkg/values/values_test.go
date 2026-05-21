@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 func TestDeepMerge(t *testing.T) {

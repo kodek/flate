@@ -10,9 +10,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/buroa/fluxrr/pkg/change"
-	"github.com/buroa/fluxrr/pkg/helm"
-	"github.com/buroa/fluxrr/pkg/orchestrator"
+	"github.com/home-operations/flate/pkg/change"
+	"github.com/home-operations/flate/pkg/helm"
+	"github.com/home-operations/flate/pkg/orchestrator"
 )
 
 // commonFlags collect path/namespace/selection flags shared across
@@ -112,10 +112,10 @@ type helmFlags struct {
 func bindHelmFlags(fs *pflag.FlagSet, h *helmFlags) {
 	// Default to the Kubernetes minor version bundled with the k8s.io/api
 	// dependency. Charts gated on KubeVersion (e.g. >=1.33 for ImageVolume)
-	// then render against the latest version fluxrr knows about, which
+	// then render against the latest version flate knows about, which
 	// matches what a freshly-`flux install`'d cluster would see.
 	fs.StringVar(&h.kubeVersion, "kube-version", helm.BundledKubeVersion(),
-		"Kubernetes version for .Capabilities.KubeVersion (default: version bundled with fluxrr)")
+		"Kubernetes version for .Capabilities.KubeVersion (default: version bundled with flate)")
 	fs.StringVarP(&h.apiVersions, "api-versions", "a", "", "comma-separated API versions for .Capabilities.APIVersions")
 	fs.BoolVar(&h.isUpgrade, "is-upgrade", false, "set .Release.IsUpgrade instead of .Release.IsInstall")
 	fs.BoolVar(&h.noHooks, "no-hooks", false, "exclude hook-annotated templates")

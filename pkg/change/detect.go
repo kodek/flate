@@ -85,7 +85,7 @@ func (s *Set) Reroot(prefix string) *Set {
 // file, and returns the relative paths whose contents differ. Files
 // present on only one side are also included.
 //
-// Directories whose name begins with "." (e.g. .git, .fluxrr-cache)
+// Directories whose name begins with "." (e.g. .git, .flate-cache)
 // and well-known noise dirs (node_modules) are skipped.
 func Detect(before, after string) (*Set, error) {
 	if before == "" || after == "" {
@@ -184,11 +184,11 @@ func hashTree(root string) (map[string]string, error) {
 }
 
 func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is a tree-walk result, not user-controlled
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err

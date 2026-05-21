@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/buroa/fluxrr/internal/testutil"
+	"github.com/home-operations/flate/internal/testutil"
 )
 
 func TestBuild_Simple(t *testing.T) {

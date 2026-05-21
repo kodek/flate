@@ -3,7 +3,7 @@ package selector
 import (
 	"testing"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 func TestMetadata_Matches(t *testing.T) {

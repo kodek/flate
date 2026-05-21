@@ -11,7 +11,7 @@ func TestService_BlockTillDone(t *testing.T) {
 	s := New()
 	var n atomic.Int64
 	for range 50 {
-		s.Go(context.Background(), "w", func(ctx context.Context) {
+		s.Go(context.Background(), "w", func(_ context.Context) {
 			time.Sleep(time.Millisecond)
 			n.Add(1)
 		})
@@ -29,12 +29,12 @@ func TestService_BackgroundDoesNotBlockActive(t *testing.T) {
 	s := New()
 	bgDone := make(chan struct{})
 	defer close(bgDone)
-	s.GoBackground(context.Background(), "bg", func(ctx context.Context) {
+	s.GoBackground(context.Background(), "bg", func(_ context.Context) {
 		<-bgDone
 	})
 
 	var done atomic.Bool
-	s.Go(context.Background(), "active", func(ctx context.Context) { done.Store(true) })
+	s.Go(context.Background(), "active", func(_ context.Context) { done.Store(true) })
 	s.BlockTillDone()
 	if !done.Load() {
 		t.Errorf("active task didn't run")
@@ -46,7 +46,7 @@ func TestService_BackgroundDoesNotBlockActive(t *testing.T) {
 
 func TestService_PanicCountedAndRecovered(t *testing.T) {
 	s := New()
-	s.Go(context.Background(), "boom", func(ctx context.Context) {
+	s.Go(context.Background(), "boom", func(_ context.Context) {
 		panic("oops")
 	})
 	s.BlockTillDone()
@@ -59,7 +59,7 @@ func TestService_ActiveNames(t *testing.T) {
 	s := New()
 	gate := make(chan struct{})
 	started := make(chan struct{})
-	s.Go(context.Background(), "alpha", func(ctx context.Context) {
+	s.Go(context.Background(), "alpha", func(_ context.Context) {
 		close(started)
 		<-gate
 	})

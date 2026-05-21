@@ -8,16 +8,16 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/buroa/fluxrr/pkg/change"
-	"github.com/buroa/fluxrr/pkg/controllers/helmrelease"
-	"github.com/buroa/fluxrr/pkg/controllers/kustomization"
-	"github.com/buroa/fluxrr/pkg/helm"
-	"github.com/buroa/fluxrr/pkg/kustomize"
-	"github.com/buroa/fluxrr/pkg/loader"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/source"
-	"github.com/buroa/fluxrr/pkg/store"
-	"github.com/buroa/fluxrr/pkg/task"
+	"github.com/home-operations/flate/pkg/change"
+	"github.com/home-operations/flate/pkg/controllers/helmrelease"
+	"github.com/home-operations/flate/pkg/controllers/kustomization"
+	"github.com/home-operations/flate/pkg/helm"
+	"github.com/home-operations/flate/pkg/kustomize"
+	"github.com/home-operations/flate/pkg/loader"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/source"
+	"github.com/home-operations/flate/pkg/store"
+	"github.com/home-operations/flate/pkg/task"
 )
 
 // Config carries everything the orchestrator needs.
@@ -41,7 +41,7 @@ type Config struct {
 	RegistryConfig string
 
 	// CacheDir overrides the default on-disk cache root
-	// (os.TempDir()/fluxrr-cache).
+	// (os.TempDir()/flate-cache).
 	CacheDir string
 	// ExternalFilter, when non-nil, overrides the orchestrator's
 	// internal change-set computation.
@@ -70,7 +70,7 @@ func New(cfg Config) (*Orchestrator, error) {
 
 	cacheRoot := cfg.CacheDir
 	if cacheRoot == "" {
-		cacheRoot = filepath.Join(os.TempDir(), "fluxrr-cache")
+		cacheRoot = filepath.Join(os.TempDir(), "flate-cache")
 	}
 	helmClient, err := helm.NewClient(
 		filepath.Join(cacheRoot, "helm-tmp"),
@@ -108,8 +108,13 @@ func New(cfg Config) (*Orchestrator, error) {
 	return o, nil
 }
 
-func (o *Orchestrator) Store() *store.Store    { return o.store }
-func (o *Orchestrator) Tasks() *task.Service   { return o.tasks }
+// Store returns the underlying object store.
+func (o *Orchestrator) Store() *store.Store { return o.store }
+
+// Tasks returns the task scheduler.
+func (o *Orchestrator) Tasks() *task.Service { return o.tasks }
+
+// Filter returns the change filter (may be nil-but-non-active).
 func (o *Orchestrator) Filter() *change.Filter { return o.filter }
 
 // Bootstrap discovers manifests, applies namespace inheritance, primes

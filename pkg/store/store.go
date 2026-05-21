@@ -6,7 +6,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // Store is the central in-memory state container.

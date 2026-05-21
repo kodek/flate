@@ -1,4 +1,4 @@
-# fluxrr
+# flate
 
 A single-binary Go rewrite of [flux-local](https://github.com/allenporter/flux-local)
 that renders and diffs Flux GitOps repositories **fully offline** — no
@@ -6,25 +6,25 @@ cluster, no `kubectl`, no shelling out. Helm, Kustomize, go-git, and
 oras-go are linked in as native Go libraries.
 
 ```bash
-go install github.com/buroa/fluxrr/cmd/fluxrr@latest
+go install github.com/home-operations/flate/cmd/flate@latest
 ```
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `fluxrr get ks\|hr\|cl` | list Kustomizations, HelmReleases, cluster summary |
-| `fluxrr build ks\|hr\|all` | render manifests via the kustomize + helm SDKs |
-| `fluxrr diff ks\|hr` | diff a working tree against a baseline (`--path-orig`) |
-| `fluxrr test` | codegen + run table-driven Go tests against the repo |
-| `fluxrr diag` | YAML / `.krmignore` sanity checks |
+| `flate get ks\|hr\|cl` | list Kustomizations, HelmReleases, cluster summary |
+| `flate build ks\|hr\|all` | render manifests via the kustomize + helm SDKs |
+| `flate diff ks\|hr` | diff a working tree against a baseline (`--path-orig`) |
+| `flate test` | codegen + run table-driven Go tests against the repo |
+| `flate diag` | YAML / `.krmignore` sanity checks |
 
 Every command takes `--path <dir>` (default `.`). Add `--path-orig <dir>`
 to switch into **changed-only mode**.
 
 ## Changed-only mode (PR-fast)
 
-Pass `--path-orig` to compare a working tree against a baseline. fluxrr
+Pass `--path-orig` to compare a working tree against a baseline. flate
 diffs files, picks the **most-specific Flux Kustomization that owns each
 change** (longest matching `spec.path`, including `spec.components`), and
 reconciles only that subtree.
@@ -48,7 +48,7 @@ What's _not_:
 
 ```bash
 git worktree add ../baseline main
-fluxrr diff ks --path ./kubernetes --path-orig ../baseline/kubernetes
+flate diff ks --path ./kubernetes --path-orig ../baseline/kubernetes
 ```
 
 One-file PRs in a 70-Kustomization repo drop reconcile time from seconds
@@ -57,7 +57,7 @@ to tens of milliseconds.
 ## Narrow entries
 
 `--path` can point at a Flux entry like `./kubernetes/flux/cluster` —
-fluxrr iteratively follows each loaded KS's `spec.path` to discover the
+flate iteratively follows each loaded KS's `spec.path` to discover the
 full content tree (`apps/`, `components/`, …) without you having to
 widen the flag.
 
@@ -100,7 +100,7 @@ For offline use, `depwait` is tuned aggressively:
 
 - **30-second per-dep ceiling** (vs. several minutes upstream).
 - **2-second missing-grace** — if a dependency never lands in the store
-  (typo'd `dependsOn`, broken `sourceRef`, missing chart source), fluxrr
+  (typo'd `dependsOn`, broken `sourceRef`, missing chart source), flate
   fails the dep with `dependency not found` rather than stalling out the
   full budget.
 
@@ -135,7 +135,7 @@ change-filter resolution → controllers → diff/build/get.
 
 - `--enable-helm`, `--enable-oci` → **true**.
 - `--kube-version` defaults to the Kubernetes minor bundled with
-  fluxrr's `k8s.io/api` dependency.
+  flate's `k8s.io/api` dependency.
 - Secrets are always replaced with `..PLACEHOLDER_<key>..` (matches
   flux-local).
 - `--skip-crds`, `--skip-secrets` → **true** for `build` / `diff`.

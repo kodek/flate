@@ -1,5 +1,5 @@
 // Package kustomize wraps sigs.k8s.io/kustomize/api so the rest of
-// fluxrr never invokes the `kustomize` CLI. It provides:
+// flate never invokes the `kustomize` CLI. It provides:
 //
 //   - Build: renders a kustomization directory to YAML documents.
 //   - Filtering helpers (FilterKinds / ExcludeKinds / GrepHelmRelease)

@@ -5,10 +5,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/buroa/fluxrr/pkg/diff"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/orchestrator"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/diff"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/orchestrator"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // firstArg returns the first positional arg, or "" when none was given.

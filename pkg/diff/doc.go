@@ -7,8 +7,8 @@
 //     unified diff body.
 //   - JSON    — same shape as YAML, marshaled as JSON.
 //
-// fluxrr intentionally does NOT shell out to an external diff tool.
+// flate intentionally does NOT shell out to an external diff tool.
 // Callers wanting `dyff`-style structured rendering should pipe
-// `fluxrr build` output through dyff themselves, or consume the YAML
+// `flate build` output through dyff themselves, or consume the YAML
 // output format here.
 package diff

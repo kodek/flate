@@ -12,13 +12,13 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/buroa/fluxrr/pkg/change"
-	"github.com/buroa/fluxrr/pkg/depwait"
-	"github.com/buroa/fluxrr/pkg/helm"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
-	"github.com/buroa/fluxrr/pkg/task"
-	"github.com/buroa/fluxrr/pkg/values"
+	"github.com/home-operations/flate/pkg/change"
+	"github.com/home-operations/flate/pkg/depwait"
+	"github.com/home-operations/flate/pkg/helm"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
+	"github.com/home-operations/flate/pkg/task"
+	"github.com/home-operations/flate/pkg/values"
 )
 
 // Controller orchestrates HelmRelease reconciliation.

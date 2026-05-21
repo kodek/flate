@@ -10,6 +10,6 @@
 //
 // Secrets are stripped of their values by default during parsing: the
 // data/stringData fields are rewritten with placeholder tokens of the form
-// "..PLACEHOLDER_<key>..". This matches flux-local's behavior — fluxrr never
+// "..PLACEHOLDER_<key>..". This matches flux-local's behavior — flate never
 // needs the cleartext values to verify cluster shape.
 package manifest

@@ -1,5 +1,5 @@
 // Package format provides the table, YAML, JSON, and "name" output
-// modes used across fluxrr's CLI surface.
+// modes used across flate's CLI surface.
 package format
 
 import (
@@ -15,6 +15,7 @@ import (
 // Output is the discriminator selected via -o on the CLI.
 type Output string
 
+// Output values understood by the -o flag.
 const (
 	OutputTable Output = "table"
 	OutputWide  Output = "wide"

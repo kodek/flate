@@ -3,8 +3,8 @@ package cli
 import (
 	"testing"
 
-	"github.com/buroa/fluxrr/pkg/change"
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/change"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 func TestScopedNamespaces_ExplicitNamespaceWins(t *testing.T) {

@@ -73,7 +73,7 @@ func (k *Kustomization) ValidateDependsOn(allKS map[string]struct{}) {
 		// statically-loaded view because parent-Kustomization
 		// targetNamespace inheritance happens lazily. Real Flux resolves
 		// them at apply time, and dropping them here only affects the
-		// wait order during fluxrr's reconcile.
+		// wait order during flate's reconcile.
 		slog.Debug("kustomization dependsOn entries dropped",
 			"kustomization", k.NamespacedName(),
 			"dropped", missing, "kept", len(kept))

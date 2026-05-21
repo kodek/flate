@@ -14,8 +14,8 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/credentials"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // FetchOCI pulls the OCIRepository artifact into cache. Credentials are
@@ -69,7 +69,7 @@ func FetchOCI(ctx context.Context, cache *Cache, repo *manifest.OCIRepository, r
 	if err != nil {
 		return nil, fmt.Errorf("oras file store: %w", err)
 	}
-	defer dest.Close()
+	defer func() { _ = dest.Close() }()
 
 	desc, err := oras.Copy(ctx, repoClient, tag, dest, tag, oras.DefaultCopyOptions)
 	if err != nil {

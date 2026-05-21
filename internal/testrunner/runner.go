@@ -1,4 +1,4 @@
-// Package testrunner implements `fluxrr test`.
+// Package testrunner implements `flate test`.
 //
 // The runner takes the post-reconcile state of the orchestrator and
 // reports it in a pytest-like progress format. It does NOT shell out
@@ -6,7 +6,7 @@
 // Store. A test "passes" when its Kustomization (and every nested
 // HelmRelease) reached Status.Ready; it "fails" otherwise. Resources
 // that were skipped by --path-orig change filtering are reported as
-// SKIPPED so users see what fluxrr actually did.
+// SKIPPED so users see what flate actually did.
 package testrunner
 
 import (
@@ -14,8 +14,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // Job collects the orchestrator's post-run state.
@@ -26,6 +26,7 @@ type Job struct {
 // Outcome enumerates the per-resource result.
 type Outcome int
 
+// Possible Outcome values.
 const (
 	OutcomePassed Outcome = iota
 	OutcomeSkipped

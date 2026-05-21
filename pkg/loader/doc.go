@@ -4,6 +4,6 @@
 //
 // Loader honors a `.krmignore`-style ignore file at the scan root.
 // Unrecognized objects (Pods, Deployments, etc.) are silently skipped
-// to match flux-local's pre-filtering: fluxrr derives them later from
+// to match flux-local's pre-filtering: flate derives them later from
 // the rendered output of Kustomizations and HelmReleases.
 package loader

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 func TestWaiter_AllReady(t *testing.T) {

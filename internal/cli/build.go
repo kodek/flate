@@ -6,11 +6,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/buroa/fluxrr/internal/format"
-	"github.com/buroa/fluxrr/pkg/kustomize"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/orchestrator"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/internal/format"
+	"github.com/home-operations/flate/pkg/kustomize"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/orchestrator"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // buildFlags holds flags shared across `build ks`, `build hr`, and
@@ -89,7 +89,7 @@ func newBuildAllCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "all",
 		Short: "Render all Kustomization and HelmRelease objects",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			applyBuildFlags(c, b)
 			o, err := runOrchestrator(cmdContext(cmd), *c, *h)
 			if err != nil && o == nil {
@@ -99,7 +99,7 @@ func newBuildAllCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer closeFn()
+			defer func() { _ = closeFn() }()
 			if err := writeRendered(w, o, manifest.KindKustomization, "", c, b); err != nil {
 				return err
 			}
@@ -126,7 +126,7 @@ func emitRendered(stdout io.Writer, o *orchestrator.Orchestrator, kind, name str
 	if err != nil {
 		return err
 	}
-	defer closeFn()
+	defer func() { _ = closeFn() }()
 	return writeRendered(w, o, kind, name, c, b)
 }
 

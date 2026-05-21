@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"sync"
 
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/registry"
+	"helm.sh/helm/v4/pkg/chart/v2/loader"
+	"helm.sh/helm/v4/pkg/registry"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // LocalGitRepository couples a GitRepository CRD with the cached working
@@ -47,12 +47,12 @@ type Client struct {
 // NewClient constructs a Client. tmpDir and cacheDir are used for
 // scratch chart downloads. Both will be created if absent.
 func NewClient(tmpDir, cacheDir string) (*Client, error) {
-	tmpDir = cmp.Or(tmpDir, filepath.Join(os.TempDir(), "fluxrr-helm"))
-	cacheDir = cmp.Or(cacheDir, filepath.Join(os.TempDir(), "fluxrr-helm-cache"))
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+	tmpDir = cmp.Or(tmpDir, filepath.Join(os.TempDir(), "flate-helm"))
+	cacheDir = cmp.Or(cacheDir, filepath.Join(os.TempDir(), "flate-helm-cache"))
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
 		return nil, err
 	}
 	reg, err := registry.NewClient(registry.ClientOptCredentialsFile(""))
@@ -119,14 +119,14 @@ func (c *Client) LocateChart(ctx context.Context, hr *manifest.HelmRelease) (str
 }
 
 // LoadChart resolves and loads the chart into helm's in-memory model.
-func (c *Client) LoadChart(ctx context.Context, hr *manifest.HelmRelease) (chartLoadResult, error) {
+func (c *Client) LoadChart(ctx context.Context, hr *manifest.HelmRelease) (ChartLoadResult, error) {
 	path, err := c.LocateChart(ctx, hr)
 	if err != nil {
-		return chartLoadResult{}, err
+		return ChartLoadResult{}, err
 	}
 	ch, err := loader.Load(path)
 	if err != nil {
-		return chartLoadResult{}, fmt.Errorf("load chart %s: %w", path, err)
+		return ChartLoadResult{}, fmt.Errorf("load chart %s: %w", path, err)
 	}
-	return chartLoadResult{Path: path, Chart: ch}, nil
+	return ChartLoadResult{Path: path, Chart: ch}, nil
 }

@@ -3,9 +3,9 @@ package loader
 import (
 	"testing"
 
-	"github.com/buroa/fluxrr/internal/testutil"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/internal/testutil"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 var writeFile = testutil.WriteFile

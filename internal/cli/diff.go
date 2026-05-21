@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/buroa/fluxrr/pkg/diff"
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/diff"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 func newDiffCmd() *cobra.Command {
@@ -115,7 +115,7 @@ func runDiff(cmd *cobra.Command, c *commonFlags, h *helmFlags, d *diffFlags, kin
 	if err != nil {
 		return err
 	}
-	defer closeFn()
+	defer func() { _ = closeFn() }()
 	_, err = w.Write(formatted)
 	return err
 }

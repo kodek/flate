@@ -15,8 +15,8 @@ integration suite.
 
 ## Upstream attribution
 
-fluxrr's controller architecture and behavior follow the design of
-[`flux-local`](https://github.com/allenporter/flux-local). The fluxrr
+flate's controller architecture and behavior follow the design of
+[`flux-local`](https://github.com/allenporter/flux-local). The flate
 `testdata/simple` corpus is intentionally minimal and was authored from
 scratch for the Go port; the larger `flux-local/tests/testdata/*` clusters
 remain available in upstream for reference.

@@ -7,9 +7,9 @@ import (
 	"slices"
 	"strings"
 
-	yaml "gopkg.in/yaml.v3"
+	yaml "go.yaml.in/yaml/v4"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // ksClaim records a single (Flux Kustomization, path) tuple. A KS may
@@ -71,7 +71,7 @@ func buildOwnership(objs ObjectLister, repoRoot string) ownershipIndex {
 // of the kustomization file at base (resolved relative to repoRoot).
 func readKustomizeComponents(repoRoot, base string) []string {
 	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
-		data, err := os.ReadFile(filepath.Join(repoRoot, base, name))
+		data, err := os.ReadFile(filepath.Join(repoRoot, base, name)) //nolint:gosec // path composed from known cluster layout
 		if err != nil {
 			continue
 		}

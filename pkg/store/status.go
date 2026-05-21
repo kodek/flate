@@ -1,10 +1,11 @@
 package store
 
-import "github.com/buroa/fluxrr/pkg/manifest"
+import "github.com/home-operations/flate/pkg/manifest"
 
 // Status is the processing state of a resource.
 type Status string
 
+// Possible Status values.
 const (
 	StatusPending Status = "Pending"
 	StatusReady   Status = "Ready"

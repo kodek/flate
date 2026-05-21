@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	yaml "gopkg.in/yaml.v3"
+	yaml "go.yaml.in/yaml/v4"
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
@@ -40,7 +40,7 @@ func SplitDocs(data []byte) ([]map[string]any, error) {
 }
 
 // nodeToMap converts a yaml.Node to map[string]any by routing through
-// sigs.k8s.io/yaml so map keys come out as strings (gopkg.in/yaml.v3's
+// sigs.k8s.io/yaml so map keys come out as strings (go.yaml.in/yaml/v4's
 // native decode produces interface{} keys for some shapes).
 func nodeToMap(node *yaml.Node) (map[string]any, error) {
 	if node == nil || node.Kind == 0 {

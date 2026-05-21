@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/buroa/fluxrr/internal/testrunner"
+	"github.com/home-operations/flate/internal/testrunner"
 )
 
 func newTestCmd() *cobra.Command {
@@ -14,7 +14,7 @@ func newTestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "test",
 		Short: "Validate cluster resources (reports Kustomization + HelmRelease reconcile status)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			o, err := runOrchestrator(cmdContext(cmd), *c, *h)
 			if err != nil && o == nil {
 				return err

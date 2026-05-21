@@ -1,0 +1,42 @@
+---
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+project_name: flate
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: flate
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    main: ./cmd/flate/main.go
+    binary: flate
+
+archives:
+  - id: flate
+    ids:
+      - flate
+    format_overrides:
+      - goos: windows
+        formats: ['zip']
+
+upx:
+  - enabled: true
+    compress: best
+    lzma: true

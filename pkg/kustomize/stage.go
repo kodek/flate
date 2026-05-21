@@ -38,7 +38,7 @@ func NewStagingCache(parent string) (*StagingCache, error) {
 	if parent == "" {
 		parent = os.TempDir()
 	}
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return nil, err
 	}
 	return &StagingCache{
@@ -89,7 +89,7 @@ func (c *StagingCache) Close() error {
 // src into it. Symlinks are dereferenced (we want the file content),
 // dotfiles are skipped to keep stages clean.
 func (c *StagingCache) copyTree(src string) (string, error) {
-	dst, err := os.MkdirTemp(c.root, "fluxrr-stage-*")
+	dst, err := os.MkdirTemp(c.root, "flate-stage-*")
 	if err != nil {
 		return "", err
 	}
@@ -107,11 +107,11 @@ func (c *StagingCache) copyTree(src string) (string, error) {
 		base := d.Name()
 		if d.IsDir() {
 			// Skip anything that isn't user content: .git / node_modules
-			// and every dot-prefixed dir (which captures .fluxrr-cache).
+			// and every dot-prefixed dir (which captures .flate-cache).
 			if base == "node_modules" || (len(base) > 0 && base[0] == '.') {
 				return fs.SkipDir
 			}
-			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
+			return os.MkdirAll(filepath.Join(dst, rel), 0o750)
 		}
 		// Read regular files (or follow symlinks to regular files).
 		info, err := os.Stat(path)
@@ -131,17 +131,17 @@ func (c *StagingCache) copyTree(src string) (string, error) {
 }
 
 func copyFile(srcPath, dstPath string, mode os.FileMode) error {
-	src, err := os.Open(srcPath)
+	src, err := os.Open(srcPath) //nolint:gosec // srcPath is a tree-walk result under our source root
 	if err != nil {
 		return err
 	}
-	defer src.Close()
-	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
+	defer func() { _ = src.Close() }()
+	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm()) //nolint:gosec // dstPath is inside our staging tempdir
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(dst, src); err != nil {
-		dst.Close()
+		_ = dst.Close()
 		return err
 	}
 	return dst.Close()

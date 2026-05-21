@@ -3,7 +3,7 @@ package change
 import (
 	"slices"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // Filter answers "should I reconcile this resource?" by checking
@@ -19,7 +19,7 @@ type Filter struct {
 	// relative to. Needed to anchor on-disk kustomization.yaml
 	// lookups during ownership resolution.
 	RepoRoot string
-	// Keep is the resolved set of resources whose work fluxrr must
+	// Keep is the resolved set of resources whose work flate must
 	// still do.
 	Keep map[manifest.NamedResource]struct{}
 
@@ -30,6 +30,7 @@ type Filter struct {
 
 type nameKey struct{ kind, name string }
 
+// Enabled reports whether change-based filtering is active.
 func (f *Filter) Enabled() bool { return f != nil && f.Changes != nil }
 
 // ShouldReconcile reports whether the controller for id should do work
@@ -51,6 +52,7 @@ func (f *Filter) ShouldReconcile(id manifest.NamedResource) bool {
 	return false
 }
 
+// SourceFile returns the file path that produced id, when known.
 func (f *Filter) SourceFile(id manifest.NamedResource) string {
 	if f == nil {
 		return ""

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/buroa/fluxrr/internal/testutil"
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/internal/testutil"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 func TestOrchestrator_SimpleCluster(t *testing.T) {

@@ -8,9 +8,9 @@ import (
 )
 
 // BundledKubeVersion is the Kubernetes minor version associated with
-// the k8s.io/api module fluxrr was built against. It mirrors what the
+// the k8s.io/api module flate was built against. It mirrors what the
 // upstream helm SDK would inject if running inside a cluster of that
-// version, and is fluxrr's default for the `--kube-version` flag.
+// version, and is flate's default for the `--kube-version` flag.
 //
 // The mapping is well-defined: k8s.io/api v0.X.Y corresponds to
 // Kubernetes v1.X.Y. We derive X.Y at startup from build-info; if

@@ -6,12 +6,12 @@ import (
 	"slices"
 	"strings"
 
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chartutil"
-	"helm.sh/helm/v3/pkg/cli"
-	"helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/chart/common"
+	"helm.sh/helm/v4/pkg/cli"
+	release "helm.sh/helm/v4/pkg/release/v1"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // Template renders a HelmRelease and returns the rendered manifest as a
@@ -29,14 +29,13 @@ func (c *Client) Template(ctx context.Context, hr *manifest.HelmRelease, values 
 	settings := cli.New()
 
 	cfg := new(action.Configuration)
-	if err := cfg.Init(settings.RESTClientGetter(), hr.ReleaseNamespace(), "", noopLog); err != nil {
+	if err := cfg.Init(settings.RESTClientGetter(), hr.ReleaseNamespace(), ""); err != nil {
 		return "", fmt.Errorf("helm init: %w", err)
 	}
 	cfg.Capabilities = caps
 
 	inst := action.NewInstall(cfg)
-	inst.DryRun = true
-	inst.ClientOnly = true
+	inst.DryRunStrategy = action.DryRunClient
 	inst.ReleaseName = hr.Name
 	inst.Namespace = hr.ReleaseNamespace()
 	inst.IncludeCRDs = !opts.SkipCRDs
@@ -48,7 +47,7 @@ func (c *Client) Template(ctx context.Context, hr *manifest.HelmRelease, values 
 	// action.Install consults its own KubeVersion field for chart
 	// compatibility checks and ignores cfg.Capabilities for that purpose.
 	if opts.KubeVersion != "" {
-		kv, err := chartutil.ParseKubeVersion(opts.KubeVersion)
+		kv, err := common.ParseKubeVersion(opts.KubeVersion)
 		if err != nil {
 			return "", fmt.Errorf("parse kube-version %q: %w", opts.KubeVersion, err)
 		}
@@ -59,15 +58,19 @@ func (c *Client) Template(ctx context.Context, hr *manifest.HelmRelease, values 
 	}
 
 	if hr.Chart.Version != "" {
-		inst.ChartPathOptions.Version = hr.Chart.Version
+		inst.Version = hr.Chart.Version
 	}
 
 	rel, err := inst.RunWithContext(ctx, loaded.Chart, values)
 	if err != nil {
 		return "", fmt.Errorf("helm template %s/%s: %w", hr.Namespace, hr.Name, err)
 	}
+	relV1, ok := rel.(*release.Release)
+	if !ok {
+		return "", fmt.Errorf("helm template %s/%s: unexpected release type %T", hr.Namespace, hr.Name, rel)
+	}
 
-	return releaseManifest(rel, opts), nil
+	return releaseManifest(relV1, opts), nil
 }
 
 // TemplateDocs renders and returns each document parsed as a generic map.
@@ -145,9 +148,3 @@ func isTestHook(h *release.Hook) bool {
 	return slices.Contains(h.Events, release.HookTest)
 }
 
-// noopLog is helm-action's mandatory logger; we discard. Callers wanting
-// helm diagnostics should plumb a real logger through.
-func noopLog(string, ...any) {}
-
-// Helper: cap is a sanity-check util — exposed only for tests.
-var _ = chartutil.DefaultCapabilities

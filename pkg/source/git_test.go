@@ -10,7 +10,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 func TestFetchGit_LocalFileURL(t *testing.T) {
@@ -69,7 +69,7 @@ func mustInitRepo(t *testing.T, dir string) {
 		t.Fatalf("PlainInit: %v", err)
 	}
 	hello := filepath.Join(dir, "hello.txt")
-	if err := os.WriteFile(hello, []byte("hi"), 0o644); err != nil {
+	if err := os.WriteFile(hello, []byte("hi"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	wt, err := r.Worktree()

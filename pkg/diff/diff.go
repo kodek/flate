@@ -11,12 +11,13 @@ import (
 	"github.com/pmezard/go-difflib/difflib"
 	"sigs.k8s.io/yaml"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // Format selects the diff output flavor.
 type Format string
 
+// Format values understood by Render.
 const (
 	FormatUnified Format = "diff"
 	FormatObject  Format = "object"

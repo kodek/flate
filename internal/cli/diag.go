@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 func newDiagCmd() *cobra.Command {
@@ -18,7 +18,7 @@ func newDiagCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "diag",
 		Short: "Sanity-check YAML manifests under a path",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			abs, err := filepath.Abs(path)
 			if err != nil {
 				return err
@@ -43,7 +43,7 @@ func newDiagCmd() *cobra.Command {
 				if ext != ".yaml" && ext != ".yml" {
 					return nil
 				}
-				data, err := os.ReadFile(p)
+				data, err := os.ReadFile(p) //nolint:gosec // p is a tree-walk result under the user-supplied --path
 				if err != nil {
 					return err
 				}
@@ -53,7 +53,7 @@ func newDiagCmd() *cobra.Command {
 				docs, err := manifest.SplitDocs(data)
 				if err != nil {
 					ok = false
-					fmt.Fprintf(cmd.OutOrStdout(), "[DIAGNOSTICS FAIL]: %s %v\n", p, err)
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "[DIAGNOSTICS FAIL]: %s %v\n", p, err)
 					return nil
 				}
 				if len(docs) == 0 {
@@ -65,7 +65,7 @@ func newDiagCmd() *cobra.Command {
 				return err
 			}
 			if ok {
-				fmt.Fprintln(cmd.OutOrStdout(), "[DIAGNOSTICS OK]")
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "[DIAGNOSTICS OK]")
 			}
 			return nil
 		},

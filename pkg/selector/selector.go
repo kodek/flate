@@ -1,10 +1,10 @@
 // Package selector implements path + metadata filtering used by every
-// fluxrr command. Selectors are translated from CLI flags by the cli
+// flate command. Selectors are translated from CLI flags by the cli
 // package and consumed by controllers and the orchestrator to decide
 // which Kustomizations/HelmReleases to consider.
 package selector
 
-import "github.com/buroa/fluxrr/pkg/manifest"
+import "github.com/home-operations/flate/pkg/manifest"
 
 // Metadata filters resources by Kubernetes-style metadata.
 type Metadata struct {

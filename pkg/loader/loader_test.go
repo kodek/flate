@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/buroa/fluxrr/internal/testutil"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/internal/testutil"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 func TestLoader_Load(t *testing.T) {
@@ -48,7 +48,7 @@ data:
 
 func TestLoader_SkipsTemplatesDir(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "chart", "templates"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "chart", "templates"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	testutil.WriteFile(t, dir, "chart/templates/cm.yaml", `{{ if .Values.x }}foo: bar{{ end }}`)

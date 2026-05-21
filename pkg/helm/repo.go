@@ -10,11 +10,11 @@ import (
 	"strings"
 	"sync"
 
-	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/getter"
-	"helm.sh/helm/v3/pkg/repo"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
+	"helm.sh/helm/v4/pkg/getter"
+	repo "helm.sh/helm/v4/pkg/repo/v1"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // chartCacheLocks serializes concurrent fetches of the same cached
@@ -44,9 +44,9 @@ func writeAtomic(path string, data []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op if rename succeeds
+	defer func() { _ = os.Remove(tmpName) }() // no-op if rename succeeds
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -55,7 +55,8 @@ func writeAtomic(path string, data []byte) error {
 	return os.Rename(tmpName, path)
 }
 
-type chartLoadResult struct {
+// ChartLoadResult is the loaded chart plus the on-disk path it came from.
+type ChartLoadResult struct {
 	Path  string
 	Chart *chart.Chart
 }
@@ -156,7 +157,7 @@ func (c *Client) fetchIndex(indexURL string) (*repo.IndexFile, error) {
 	if err := tmp.Close(); err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	idx, err := repo.LoadIndexFile(tmpPath)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", indexURL, err)

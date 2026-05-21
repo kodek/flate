@@ -4,16 +4,16 @@ import (
 	"slices"
 	"strings"
 
-	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v4/pkg/chart/common"
 )
 
-// Options collects the helm template flags fluxrr supports.
+// Options collects the helm template flags flate supports.
 type Options struct {
 	// SkipCRDs excludes CRDs from the rendered output.
 	SkipCRDs bool
 	// SkipTests excludes templates that are helm test hooks.
 	SkipTests bool
-	// SkipSecrets excludes Secret resources from the output. fluxrr
+	// SkipSecrets excludes Secret resources from the output. flate
 	// uses placeholder values anyway but stripping makes diffs tidier.
 	SkipSecrets bool
 	// SkipKinds is an arbitrary list of kinds to drop.
@@ -48,19 +48,19 @@ func (o Options) SkipResourceKinds() []string {
 	return out
 }
 
-// capabilities builds chartutil.Capabilities from the supplied options.
+// capabilities builds common.Capabilities from the supplied options.
 // Returns the default capabilities when no overrides are provided.
-func (o Options) capabilities() (*chartutil.Capabilities, error) {
-	caps := chartutil.DefaultCapabilities.Copy()
+func (o Options) capabilities() (*common.Capabilities, error) {
+	caps := common.DefaultCapabilities.Copy()
 	if o.KubeVersion != "" {
-		kv, err := chartutil.ParseKubeVersion(o.KubeVersion)
+		kv, err := common.ParseKubeVersion(o.KubeVersion)
 		if err != nil {
 			return nil, err
 		}
 		caps.KubeVersion = *kv
 	}
 	if o.APIVersions != "" {
-		caps.APIVersions = chartutil.VersionSet(splitComma(o.APIVersions))
+		caps.APIVersions = common.VersionSet(splitComma(o.APIVersions))
 	}
 	return caps, nil
 }

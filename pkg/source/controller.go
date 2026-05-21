@@ -4,10 +4,10 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/buroa/fluxrr/pkg/change"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
-	"github.com/buroa/fluxrr/pkg/task"
+	"github.com/home-operations/flate/pkg/change"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
+	"github.com/home-operations/flate/pkg/task"
 )
 
 // Controller watches the Store for GitRepository and OCIRepository

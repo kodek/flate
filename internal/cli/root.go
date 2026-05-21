@@ -1,4 +1,4 @@
-// Package cli wires fluxrr's command-line interface using cobra.
+// Package cli wires flate's command-line interface using cobra.
 //
 // Commands:
 //   - get   — list Flux objects (Kustomizations, HelmReleases, Clusters).
@@ -7,8 +7,8 @@
 //   - test  — report Kustomization + HelmRelease reconcile status.
 //   - diag  — sanity-check local manifests.
 //
-// Use New() to obtain a cobra.Command for embedding fluxrr in a parent
-// CLI; Execute() and Run() are the entry points used by cmd/fluxrr and
+// Use New() to obtain a cobra.Command for embedding flate in a parent
+// CLI; Execute() and Run() are the entry points used by cmd/flate and
 // by in-process E2E tests respectively.
 package cli
 
@@ -27,9 +27,9 @@ import (
 // Callers that want full control over I/O streams should use Run.
 func New() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "fluxrr",
+		Use:           "flate",
 		Short:         "Validate a local Flux GitOps repo without a live cluster.",
-		Long:          "fluxrr renders and diffs Flux manifests using the upstream helm, kustomize, and source SDKs — no `helm`, `kustomize`, or `flux` binaries needed.",
+		Long:          "flate renders and diffs Flux manifests using the upstream helm, kustomize, and source SDKs — no `helm`, `kustomize`, or `flux` binaries needed.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -56,8 +56,8 @@ func Execute() int {
 	return Run(os.Args[1:], os.Stdout, os.Stderr)
 }
 
-// Run executes fluxrr with the supplied argv and I/O streams, returning
-// the exit code. Used by cmd/fluxrr's main and by in-process tests.
+// Run executes flate with the supplied argv and I/O streams, returning
+// the exit code. Used by cmd/flate's main and by in-process tests.
 //
 // A context that listens for SIGINT / SIGTERM is propagated to commands
 // via cobra.Command.Context, so Ctrl-C cleanly cancels in-flight work.
@@ -70,7 +70,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	if err := root.ExecuteContext(ctx); err != nil {
-		_, _ = io.WriteString(stderr, "fluxrr error: "+err.Error()+"\n")
+		_, _ = io.WriteString(stderr, "flate error: "+err.Error()+"\n")
 		return 1
 	}
 	return 0

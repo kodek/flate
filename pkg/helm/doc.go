@@ -1,4 +1,4 @@
-// Package helm wraps helm.sh/helm/v3 to render HelmReleases without
+// Package helm wraps helm.sh/helm/v4 to render HelmReleases without
 // shelling out to the `helm` binary.
 //
 // The exported surface mirrors the operations flux-local performs:
@@ -8,7 +8,7 @@
 //   - Client.AddRepo registers a HelmRepository / OCIRepository /
 //     LocalGitRepository so subsequent Template calls can resolve their
 //     charts.
-//   - Options exposes the helm CLI flags fluxrr understands
+//   - Options exposes the helm CLI flags flate understands
 //     (--kube-version, --api-versions, --no-hooks, etc.).
 //
 // The client is safe for concurrent use; chart downloads are cached on

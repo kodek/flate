@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	yaml "gopkg.in/yaml.v3"
+	yaml "go.yaml.in/yaml/v4"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // ApplyNamespaceInheritance fills empty metadata.namespace fields on
@@ -143,7 +143,7 @@ func indexKustomizeNamespaces(sourceFiles map[manifest.NamedResource]string, rep
 func readKustomizeNamespace(repoRoot, dir string) string {
 	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
 		path := filepath.Join(repoRoot, dir, name)
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // path composed from known cluster layout
 		if err != nil {
 			continue
 		}

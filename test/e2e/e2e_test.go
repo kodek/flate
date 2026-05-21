@@ -1,4 +1,4 @@
-// Package e2e exercises the fluxrr CLI against the testdata fixtures.
+// Package e2e exercises the flate CLI against the testdata fixtures.
 //
 // Tests run the cobra command tree in-process via cli.Run, capturing
 // stdout/stderr into byte buffers. There is no fork/exec: the entire
@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/buroa/fluxrr/internal/cli"
+	"github.com/home-operations/flate/internal/cli"
 )
 
 func runCLI(t *testing.T, args ...string) string {
@@ -21,7 +21,7 @@ func runCLI(t *testing.T, args ...string) string {
 	var stdout, stderr bytes.Buffer
 	code := cli.Run(args, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("fluxrr %s exited %d\nstdout:\n%s\nstderr:\n%s",
+		t.Fatalf("flate %s exited %d\nstdout:\n%s\nstderr:\n%s",
 			strings.Join(args, " "), code, stdout.String(), stderr.String())
 	}
 	return stdout.String() + stderr.String()
@@ -60,17 +60,17 @@ func TestE2E_GetKS(t *testing.T) {
 }
 
 func TestE2E_BuildKS(t *testing.T) {
-	out := runCLI(t, "build", "ks", "--path", testdataPath(t, "simple"))
+	out := runCLI(t, "build", "ks", "--path", copyTree(t, testdataPath(t, "simple")))
 	if !strings.Contains(out, "kind: ConfigMap") {
 		t.Errorf("missing ConfigMap:\n%s", out)
 	}
-	if !strings.Contains(out, "greeting: hello-from-fluxrr") {
+	if !strings.Contains(out, "greeting: hello-from-flate") {
 		t.Errorf("missing expected value:\n%s", out)
 	}
 }
 
 func TestE2E_BuildHR(t *testing.T) {
-	out := runCLI(t, "build", "hr", "--path", testdataPath(t, "simple"))
+	out := runCLI(t, "build", "hr", "--path", copyTree(t, testdataPath(t, "simple")))
 	if !strings.Contains(out, "demo-cm") {
 		t.Errorf("missing rendered HR ConfigMap:\n%s", out)
 	}
@@ -110,7 +110,7 @@ func TestE2E_BadPath(t *testing.T) {
 }
 
 func TestE2E_TestCommand(t *testing.T) {
-	out := runCLI(t, "test", "--path", testdataPath(t, "simple"), "--enable-helm")
+	out := runCLI(t, "test", "--path", copyTree(t, testdataPath(t, "simple")))
 	if !strings.Contains(out, "PASSED") {
 		t.Errorf("expected PASSED in test output:\n%s", out)
 	}
@@ -136,7 +136,7 @@ func TestE2E_ComponentChangePropagatesToAllConsumers(t *testing.T) {
 
 	// Mutate the shared component in only the "current" tree.
 	target := filepath.Join(current, "components", "shared", "shared-cm.yaml")
-	data, err := os.ReadFile(target)
+	data, err := os.ReadFile(target) //nolint:gosec // target is inside a t.TempDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestE2E_ComponentChangePropagatesToAllConsumers(t *testing.T) {
 	if mutated == string(data) {
 		t.Fatal("fixture sentinel not found; check shared-cm.yaml")
 	}
-	if err := os.WriteFile(target, []byte(mutated), 0o644); err != nil {
+	if err := os.WriteFile(target, []byte(mutated), 0o600); err != nil { //nolint:gosec // target is inside a t.TempDir()
 		t.Fatal(err)
 	}
 
@@ -167,7 +167,7 @@ func TestE2E_NonSharedChangeDoesNotPropagate(t *testing.T) {
 	current := copyTree(t, src)
 
 	target := filepath.Join(current, "apps", "app-a", "cm.yaml")
-	data, err := os.ReadFile(target)
+	data, err := os.ReadFile(target) //nolint:gosec // target is inside a t.TempDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestE2E_NonSharedChangeDoesNotPropagate(t *testing.T) {
 	if mutated == string(data) {
 		t.Fatal("fixture sentinel not found")
 	}
-	if err := os.WriteFile(target, []byte(mutated), 0o644); err != nil {
+	if err := os.WriteFile(target, []byte(mutated), 0o600); err != nil { //nolint:gosec // target is inside a t.TempDir()
 		t.Fatal(err)
 	}
 
@@ -203,13 +203,13 @@ func copyTree(t *testing.T, src string) string {
 		rel, _ := filepath.Rel(src, p)
 		out := filepath.Join(dst, rel)
 		if info.IsDir() {
-			return os.MkdirAll(out, 0o755)
+			return os.MkdirAll(out, 0o750)
 		}
-		data, err := os.ReadFile(p)
+		data, err := os.ReadFile(p) //nolint:gosec // p is supplied by filepath.Walk over a known root
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(out, data, 0o644)
+		return os.WriteFile(out, data, 0o600) //nolint:gosec // dst is t.TempDir()
 	})
 	if err != nil {
 		t.Fatal(err)

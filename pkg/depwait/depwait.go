@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // DefaultTimeout is the per-dep timeout when not specified. The
 // upstream Flux controllers default to several minutes since they
-// wait for in-cluster reconciliation; fluxrr is purely offline, so
+// wait for in-cluster reconciliation; flate is purely offline, so
 // waits past a few seconds almost always indicate a misconfigured
 // reference. Keep this short so typos in dependsOn / sourceRef
 // surface immediately instead of stalling a render.
@@ -29,6 +29,7 @@ const MissingGrace = 2 * time.Second
 // DepStatus enumerates the per-dependency resolution result.
 type DepStatus int
 
+// Possible DepStatus values.
 const (
 	DepPending DepStatus = iota
 	DepReady
@@ -44,7 +45,10 @@ type Event struct {
 	Reason string
 }
 
+// Success reports whether the dependency reached DepReady.
 func (e Event) Success() bool { return e.Status == DepReady }
+
+// Failure reports whether the dependency reached a terminal non-success state.
 func (e Event) Failure() bool {
 	return e.Status == DepFailed || e.Status == DepTimeout || e.Status == DepCancelled
 }
@@ -57,7 +61,10 @@ type Summary struct {
 	Messages map[manifest.NamedResource]string
 }
 
-func (s Summary) AllReady() bool  { return len(s.Failed) == 0 && len(s.Pending) == 0 }
+// AllReady reports whether every dependency reached DepReady.
+func (s Summary) AllReady() bool { return len(s.Failed) == 0 && len(s.Pending) == 0 }
+
+// AnyFailed reports whether at least one dependency ended in failure.
 func (s Summary) AnyFailed() bool { return len(s.Failed) > 0 }
 
 // Waiter holds the parameters for one dependency-wait operation.

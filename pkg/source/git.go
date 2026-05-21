@@ -10,8 +10,8 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 // FetchGit clones the GitRepository referenced by repo into the supplied
@@ -49,7 +49,7 @@ func FetchGit(ctx context.Context, cache *Cache, repo *manifest.GitRepository) (
 		}
 		// Stale slot — wipe and re-clone.
 		_ = cache.Reset(slot)
-		if err := os.MkdirAll(slot, 0o755); err != nil {
+		if err := os.MkdirAll(slot, 0o750); err != nil {
 			return nil, err
 		}
 	}

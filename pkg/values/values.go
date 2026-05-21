@@ -9,7 +9,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // Provider exposes the ConfigMap/Secret lookups needed for value

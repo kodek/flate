@@ -1,6 +1,6 @@
 package store
 
-import "github.com/buroa/fluxrr/pkg/manifest"
+import "github.com/home-operations/flate/pkg/manifest"
 
 // Artifact is a marker interface implemented by every artifact type.
 // Controllers type-assert to the concrete type they expect.

@@ -4,4 +4,4 @@ metadata:
   name: hello
   namespace: apps
 data:
-  greeting: hello-from-fluxrr
+  greeting: hello-from-flate

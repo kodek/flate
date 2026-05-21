@@ -1,6 +1,6 @@
 package store
 
-import "github.com/buroa/fluxrr/pkg/manifest"
+import "github.com/home-operations/flate/pkg/manifest"
 
 // EventKind enumerates the three observable changes the Store dispatches.
 type EventKind int

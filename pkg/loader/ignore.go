@@ -20,14 +20,14 @@ type ignoreSet struct {
 func loadIgnore(root string) (*ignoreSet, error) {
 	out := &ignoreSet{}
 	path := filepath.Join(root, ".krmignore")
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // root is the cluster scan root
 	if err != nil {
 		if os.IsNotExist(err) {
 			return out, nil
 		}
 		return out, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())

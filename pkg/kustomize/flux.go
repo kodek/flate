@@ -10,7 +10,7 @@ import (
 	fluxkustomize "github.com/fluxcd/pkg/kustomize"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // RenderFlux renders a Flux kustomize.toolkit.fluxcd.io Kustomization
@@ -103,7 +103,7 @@ func restoreKustomizationFile(sourceRoot, stagedSub, subPath string) error {
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		data, err := os.ReadFile(srcPath)
+		data, err := os.ReadFile(srcPath) //nolint:gosec // srcPath inside our cluster source root
 		if err != nil {
 			return fmt.Errorf("restore kustomization.yaml: %w", err)
 		}
@@ -114,7 +114,7 @@ func restoreKustomizationFile(sourceRoot, stagedSub, subPath string) error {
 				_ = os.Remove(filepath.Join(stagedSub, other))
 			}
 		}
-		return os.WriteFile(filepath.Join(stagedSub, name), data, info.Mode().Perm())
+		return os.WriteFile(filepath.Join(stagedSub, name), data, info.Mode().Perm()) //nolint:gosec // stagedSub is our own tempdir
 	}
 	// No source kustomization.yaml — remove any stale staged copy
 	// so Generator starts cleanly.

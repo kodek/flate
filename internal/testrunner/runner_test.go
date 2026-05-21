@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 func TestRun_AllPass(t *testing.T) {

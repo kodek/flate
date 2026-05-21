@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // WatchReady blocks until the resource reaches Ready or Failed status,

@@ -3,7 +3,7 @@ package kustomize
 import (
 	"slices"
 
-	"github.com/buroa/fluxrr/pkg/manifest"
+	"github.com/home-operations/flate/pkg/manifest"
 )
 
 // FilterKinds returns a new slice with only the documents whose `kind`

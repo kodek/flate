@@ -12,13 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/buroa/fluxrr/pkg/change"
-	"github.com/buroa/fluxrr/pkg/depwait"
-	"github.com/buroa/fluxrr/pkg/kustomize"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/store"
-	"github.com/buroa/fluxrr/pkg/task"
-	"github.com/buroa/fluxrr/pkg/values"
+	"github.com/home-operations/flate/pkg/change"
+	"github.com/home-operations/flate/pkg/depwait"
+	"github.com/home-operations/flate/pkg/kustomize"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/store"
+	"github.com/home-operations/flate/pkg/task"
+	"github.com/home-operations/flate/pkg/values"
 )
 
 // Controller orchestrates Kustomization reconciliation.
@@ -134,7 +134,7 @@ func (c *Controller) reconcile(ctx context.Context, ks *manifest.Kustomization) 
 		obj, err := manifest.ParseDoc(doc, opts)
 		if err != nil {
 			// Don't fail on parse errors of inline resources — they may
-			// be raw kubernetes manifests fluxrr doesn't track. Log and
+			// be raw kubernetes manifests flate doesn't track. Log and
 			// continue.
 			slog.Debug("kustomization: skipped doc", "id", id.String(), "err", err)
 			continue

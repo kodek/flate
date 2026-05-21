@@ -8,12 +8,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/buroa/fluxrr/internal/format"
-	"github.com/buroa/fluxrr/pkg/image"
-	"github.com/buroa/fluxrr/pkg/manifest"
-	"github.com/buroa/fluxrr/pkg/orchestrator"
-	"github.com/buroa/fluxrr/pkg/selector"
-	"github.com/buroa/fluxrr/pkg/store"
+	"github.com/home-operations/flate/internal/format"
+	"github.com/home-operations/flate/pkg/image"
+	"github.com/home-operations/flate/pkg/manifest"
+	"github.com/home-operations/flate/pkg/orchestrator"
+	"github.com/home-operations/flate/pkg/selector"
+	"github.com/home-operations/flate/pkg/store"
 )
 
 func newGetCmd() *cobra.Command {
@@ -62,7 +62,7 @@ func newGetClusterCmd() *cobra.Command {
 		Use:     "cl",
 		Aliases: []string{"cluster", "clusters"},
 		Short:   "Summarize the cluster",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			o, err := runOrchestrator(cmdContext(cmd), *c, *h)
 			if err != nil && o == nil {
 				return err
@@ -71,7 +71,7 @@ func newGetClusterCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer closeFn()
+			defer func() { _ = closeFn() }()
 			if enableImages || onlyImages {
 				return printClusterImages(w, o, c.output, onlyImages)
 			}
@@ -113,7 +113,7 @@ func resourceListCmd[T manifest.BaseManifest](
 			if err != nil {
 				return err
 			}
-			defer closeFn()
+			defer func() { _ = closeFn() }()
 			return printResources(w, o, sel, c, c.output, kind, cols, mapper)
 		},
 	}
