@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.3](https://github.com/home-operations/flate/compare/0.0.2...0.0.3) (2026-05-21)
+
+
+### Bug Fixes
+
+* **diff:** correct deletion output and stabilize reconcile race ([f06751f](https://github.com/home-operations/flate/commit/f06751faf4d20ceda04f3eae9dbe1c22b36e3421))
+* **diff:** correct deletion output and stabilize reconcile race ([7b0aa9d](https://github.com/home-operations/flate/commit/7b0aa9d2b728546efe1cbdf81c0d053ccc7f0ac8))
+
 ## [0.0.2](https://github.com/home-operations/flate/compare/0.0.1...0.0.2) (2026-05-21)
 
 
