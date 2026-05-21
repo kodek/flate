@@ -73,7 +73,7 @@ func newGetClusterCmd() *cobra.Command {
 			}
 			defer func() { _ = closeFn() }()
 			if enableImages || onlyImages {
-				return printClusterImages(w, o, c.output, onlyImages)
+				return printClusterImages(w, o, c, onlyImages)
 			}
 			return printCluster(w, o, c.output)
 		},
@@ -192,51 +192,39 @@ type imageEntry struct {
 	Images      []string `json:"images"      yaml:"images"`
 }
 
-func printClusterImages(w io.Writer, o *orchestrator.Orchestrator, out string, onlyImages bool) error {
-	uniq := map[string]struct{}{}
+func printClusterImages(w io.Writer, o *orchestrator.Orchestrator, c *commonFlags, onlyImages bool) error {
+	if onlyImages {
+		return emitImageList(w, slices.Sorted(maps.Keys(collectImages(o, c))), c.output)
+	}
+
 	var releases []imageEntry
 	for _, obj := range o.Store().ListObjects(manifest.KindHelmRelease) {
 		hr := obj.(*manifest.HelmRelease)
+		if !c.includeNamespace(o.Filter(), hr.Namespace) {
+			continue
+		}
 		art, ok := o.Store().GetArtifact(hr.Named()).(*store.HelmReleaseArtifact)
 		if !ok {
 			continue
 		}
 		set := map[string]struct{}{}
 		for _, doc := range art.Manifests {
-			imgs, err := image.Extract(doc)
-			if err != nil {
-				continue
-			}
+			imgs, _ := image.Extract(doc)
 			for _, img := range imgs {
 				set[img] = struct{}{}
-				uniq[img] = struct{}{}
 			}
 		}
 		if len(set) == 0 {
 			continue
 		}
-		list := slices.Sorted(maps.Keys(set))
-		releases = append(releases, imageEntry{HelmRelease: hr.NamespacedName(), Images: list})
+		releases = append(releases, imageEntry{
+			HelmRelease: hr.NamespacedName(),
+			Images:      slices.Sorted(maps.Keys(set)),
+		})
 	}
 	slices.SortFunc(releases, func(a, b imageEntry) int { return cmp.Compare(a.HelmRelease, b.HelmRelease) })
 
-	if onlyImages {
-		flat := slices.Sorted(maps.Keys(uniq))
-		switch format.Output(out) {
-		case format.OutputJSON:
-			return format.JSON(w, flat)
-		case format.OutputYAML:
-			return format.YAML(w, flat)
-		}
-		for _, img := range flat {
-			if _, err := io.WriteString(w, img+"\n"); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if format.Output(out) == format.OutputJSON {
+	if format.Output(c.output) == format.OutputJSON {
 		return format.JSON(w, releases)
 	}
 	return format.YAML(w, releases)
