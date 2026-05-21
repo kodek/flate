@@ -1,0 +1,182 @@
+package manifest
+
+// GitRepositoryRef defines the ref used for pull and checkout.
+type GitRepositoryRef struct {
+	Branch string `json:"branch,omitempty" yaml:"branch,omitempty"`
+	Tag    string `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Semver string `json:"semver,omitempty" yaml:"semver,omitempty"`
+	Commit string `json:"commit,omitempty" yaml:"commit,omitempty"`
+}
+
+// RefString returns "branch:main", "tag:v1.2.3", etc., or empty when the
+// ref is empty. Precedence: commit > tag > branch > semver.
+func (r GitRepositoryRef) RefString() string {
+	switch {
+	case r.Commit != "":
+		return "commit:" + r.Commit
+	case r.Tag != "":
+		return "tag:" + r.Tag
+	case r.Branch != "":
+		return "branch:" + r.Branch
+	case r.Semver != "":
+		return "semver:" + r.Semver
+	}
+	return ""
+}
+
+// IsEmpty reports whether the ref selects no specific commit.
+func (r GitRepositoryRef) IsEmpty() bool { return r == GitRepositoryRef{} }
+
+// ParseGitRepositoryRef decodes a GitRepositoryRef from spec.ref.
+func ParseGitRepositoryRef(m map[string]any) GitRepositoryRef {
+	return GitRepositoryRef{
+		Branch: stringOr(m, "branch", ""),
+		Tag:    stringOr(m, "tag", ""),
+		Semver: stringOr(m, "semver", ""),
+		Commit: stringOr(m, "commit", ""),
+	}
+}
+
+// GitRepository is the Flux GitRepository CRD.
+type GitRepository struct {
+	Name      string           `json:"name" yaml:"name"`
+	Namespace string           `json:"namespace" yaml:"namespace"`
+	URL       string           `json:"url" yaml:"url"`
+	Ref       GitRepositoryRef `json:"ref,omitzero" yaml:"ref,omitempty"`
+}
+
+// Named identifies the GitRepository.
+func (g *GitRepository) Named() NamedResource {
+	return NamedResource{Kind: KindGitRepository, Namespace: g.Namespace, Name: g.Name}
+}
+
+// RepoName is "<namespace>-<name>".
+func (g *GitRepository) RepoName() string { return g.Namespace + "-" + g.Name }
+
+// ParseGitRepository decodes a GitRepository CR.
+func ParseGitRepository(doc map[string]any) (*GitRepository, error) {
+	if err := checkAPIVersion(doc, SourceDomain); err != nil {
+		return nil, err
+	}
+	_, name, ns, err := requireMetadata("GitRepository", doc)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := requireSpec("GitRepository", doc)
+	if err != nil {
+		return nil, err
+	}
+	url, _ := spec["url"].(string)
+	if url == "" {
+		return nil, inputf("GitRepository missing spec.url")
+	}
+	var ref GitRepositoryRef
+	if r, ok := spec["ref"].(map[string]any); ok {
+		ref = ParseGitRepositoryRef(r)
+	}
+	return &GitRepository{Name: name, Namespace: ns, URL: url, Ref: ref}, nil
+}
+
+// OCIRepositoryRef points at a specific OCI artifact version.
+type OCIRepositoryRef struct {
+	Digest       string `json:"digest,omitempty" yaml:"digest,omitempty"`
+	Tag          string `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Semver       string `json:"semver,omitempty" yaml:"semver,omitempty"`
+	SemverFilter string `json:"semverFilter,omitempty" yaml:"semverFilter,omitempty"`
+}
+
+// IsEmpty reports whether the ref is empty.
+func (r OCIRepositoryRef) IsEmpty() bool { return r == OCIRepositoryRef{} }
+
+// ParseOCIRepositoryRef decodes from spec.ref.
+func ParseOCIRepositoryRef(m map[string]any) OCIRepositoryRef {
+	return OCIRepositoryRef{
+		Digest:       stringOr(m, "digest", ""),
+		Tag:          stringOr(m, "tag", ""),
+		Semver:       stringOr(m, "semver", ""),
+		SemverFilter: stringOr(m, "semverFilter", ""),
+	}
+}
+
+// OCIRepository is the Flux OCIRepository CRD.
+type OCIRepository struct {
+	Name      string                `json:"name" yaml:"name"`
+	Namespace string                `json:"namespace" yaml:"namespace"`
+	URL       string                `json:"url" yaml:"url"`
+	Ref       OCIRepositoryRef      `json:"ref,omitzero" yaml:"ref,omitempty"`
+	SecretRef *LocalObjectReference `json:"secretRef,omitempty" yaml:"secretRef,omitempty"`
+}
+
+// Named identifies the OCIRepository.
+func (o *OCIRepository) Named() NamedResource {
+	return NamedResource{Kind: KindOCIRepository, Namespace: o.Namespace, Name: o.Name}
+}
+
+// RepoName is "<namespace>-<name>".
+func (o *OCIRepository) RepoName() string { return o.Namespace + "-" + o.Name }
+
+// Version returns the digest, tag, or semver in that order. semverFilter
+// is not supported and will return an error.
+func (o *OCIRepository) Version() (string, error) {
+	if o.Ref.IsEmpty() {
+		return "", nil
+	}
+	if o.Ref.SemverFilter != "" {
+		return "", inputf("OCIRepository semverFilter is not supported")
+	}
+	switch {
+	case o.Ref.Digest != "":
+		return o.Ref.Digest, nil
+	case o.Ref.Tag != "":
+		return o.Ref.Tag, nil
+	case o.Ref.Semver != "":
+		return o.Ref.Semver, nil
+	}
+	return "", nil
+}
+
+// VersionedURL appends the version with the correct separator: "@" for
+// digests, ":" for tags and semver.
+func (o *OCIRepository) VersionedURL() string {
+	if o.Ref.IsEmpty() {
+		return o.URL
+	}
+	switch {
+	case o.Ref.Digest != "":
+		return o.URL + "@" + o.Ref.Digest
+	case o.Ref.Tag != "":
+		return o.URL + ":" + o.Ref.Tag
+	case o.Ref.Semver != "":
+		return o.URL + ":" + o.Ref.Semver
+	}
+	return o.URL
+}
+
+// ParseOCIRepository decodes an OCIRepository CR.
+func ParseOCIRepository(doc map[string]any) (*OCIRepository, error) {
+	if err := checkAPIVersion(doc, SourceDomain); err != nil {
+		return nil, err
+	}
+	_, name, ns, err := requireMetadata("OCIRepository", doc)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := requireSpec("OCIRepository", doc)
+	if err != nil {
+		return nil, err
+	}
+	url, _ := spec["url"].(string)
+	if url == "" {
+		return nil, inputf("OCIRepository missing spec.url")
+	}
+	out := &OCIRepository{Name: name, Namespace: ns, URL: url}
+	if r, ok := spec["ref"].(map[string]any); ok {
+		out.Ref = ParseOCIRepositoryRef(r)
+	}
+	if s, ok := spec["secretRef"].(map[string]any); ok {
+		if n, ok := s["name"].(string); ok && n != "" {
+			out.SecretRef = &LocalObjectReference{Name: n}
+		}
+	}
+	return out, nil
+}
