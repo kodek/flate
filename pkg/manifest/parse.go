@@ -2,8 +2,25 @@ package manifest
 
 import (
 	"cmp"
+	"encoding/json"
 	"strings"
 )
+
+// decodeTyped re-marshals a parsed YAML document into a typed Flux CR
+// via a JSON round-trip. The Flux API types use the same JSON tags
+// k8s uses to serialize their CRDs, so this matches `kubectl apply`'s
+// decoding fidelity without keeping the raw YAML bytes around.
+//
+// Per-document cost is ~one marshal + one unmarshal; documents are
+// small (a single CR) and this only runs during the load phase, not on
+// the render hot path.
+func decodeTyped[T any](doc map[string]any, out *T) error {
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
 
 // DocKind returns the "kind" field of a manifest document, or "" if
 // absent. Centralizes the doc["kind"].(string) cast.
@@ -97,50 +114,22 @@ func checkAPIVersion(doc map[string]any, want string) error {
 	return nil
 }
 
-// requireMetadata pulls a non-nil metadata block + name + namespace.
-func requireMetadata(kind string, doc map[string]any) (md map[string]any, name, ns string, err error) {
+// requireMetadata pulls name + namespace from a non-nil metadata block.
+func requireMetadata(kind string, doc map[string]any) (name, ns string, err error) {
 	md, ok := doc["metadata"].(map[string]any)
 	if !ok || md == nil {
-		return nil, "", "", inputf("%s missing metadata", kind)
+		return "", "", inputf("%s missing metadata", kind)
 	}
 	name, _ = md["name"].(string)
 	if name == "" {
-		return nil, "", "", inputf("%s missing metadata.name", kind)
+		return "", "", inputf("%s missing metadata.name", kind)
 	}
 	ns, _ = md["namespace"].(string)
-	return md, name, ns, nil
-}
-
-// requireSpec pulls a non-nil spec block.
-func requireSpec(kind string, doc map[string]any) (map[string]any, error) {
-	spec, ok := doc["spec"].(map[string]any)
-	if !ok || spec == nil {
-		return nil, inputf("%s missing spec", kind)
-	}
-	return spec, nil
+	return name, ns, nil
 }
 
 // stringOr returns m[k] as a string, or fallback when absent/empty.
 func stringOr(m map[string]any, k, fallback string) string {
 	v, _ := m[k].(string)
 	return cmp.Or(v, fallback)
-}
-
-// asStringMap converts an any-typed map to map[string]string, dropping
-// non-string entries. Returns nil for empty results.
-func asStringMap(in any) map[string]string {
-	m, ok := in.(map[string]any)
-	if !ok {
-		return nil
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		if s, ok := v.(string); ok {
-			out[k] = s
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
