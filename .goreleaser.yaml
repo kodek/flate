@@ -34,9 +34,32 @@ archives:
       - flate
     format_overrides:
       - goos: windows
-        formats: ['zip']
+        formats:
+          - zip
 
 upx:
   - enabled: true
     compress: best
     lzma: true
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+  split: true
+
+sboms:
+  - artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.sbom.json"
+
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.crt"
+    args:
+      - sign-blob
+      - --output-certificate=${certificate}
+      - --output-signature=${signature}
+      - --yes
+      - ${artifact}
+    artifacts: all
+    output: true
