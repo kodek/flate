@@ -84,34 +84,34 @@ func chartFromHelmRelease(spec *helmv2.HelmReleaseSpec, defaultNamespace string)
 	}, nil
 }
 
-// HelmChartFromSource constructs a HelmChart from a resolved HelmChartSource.
+// HelmChartFromSource constructs a HelmChart from a resolved
+// HelmChartSource. The Repo* fields are read from the embedded
+// SourceRef (which always shares the HelmChart's namespace per Flux
+// schema).
 func HelmChartFromSource(src *HelmChartSource) HelmChart {
+	kind := src.SourceRef.Kind
+	if kind == "" {
+		kind = KindHelmRepository
+	}
 	return HelmChart{
 		Name:          src.Chart,
 		Version:       src.Version,
-		RepoName:      src.RepoName,
-		RepoNamespace: src.RepoNamespace,
-		RepoKind:      src.RepoKind,
+		RepoName:      src.SourceRef.Name,
+		RepoNamespace: src.Namespace,
+		RepoKind:      kind,
 	}
 }
 
 // HelmChartSource is the standalone HelmChart CRD
-// (source.toolkit.fluxcd.io/v1 HelmChart).
+// (source.toolkit.fluxcd.io/v1 HelmChart). The embedded HelmChartSpec
+// promotes Chart, Version, SourceRef, ValuesFiles,
+// IgnoreMissingValuesFiles, ReconcileStrategy, Suspend, Verify to the
+// top level for ergonomic access.
 type HelmChartSource struct {
-	Name                     string   `json:"name" yaml:"name"`
-	Namespace                string   `json:"namespace" yaml:"namespace"`
-	Chart                    string   `json:"chart" yaml:"chart"`
-	Version                  string   `json:"version,omitempty" yaml:"version,omitempty"`
-	RepoName                 string   `json:"repoName" yaml:"repoName"`
-	RepoNamespace            string   `json:"repoNamespace" yaml:"repoNamespace"`
-	RepoKind                 string   `json:"repoKind" yaml:"repoKind"`
-	Suspend                  bool     `json:"-" yaml:"-"`
-	ValuesFiles              []string `json:"-" yaml:"-"`
-	IgnoreMissingValuesFiles bool     `json:"-" yaml:"-"`
-	// ReconcileStrategy is "ChartVersion" (default) or "Revision". Flate
-	// does not re-trigger reconciles; this is parsed for round-tripping
-	// fidelity so consumers can observe the upstream intent.
-	ReconcileStrategy string `json:"-" yaml:"-"`
+	Name      string `json:"name"      yaml:"name"`
+	Namespace string `json:"namespace" yaml:"namespace"`
+
+	sourcev1.HelmChartSpec `json:",inline" yaml:",inline"`
 }
 
 // Named identifies the chart resource.
@@ -147,69 +147,70 @@ func ParseHelmChartSource(doc map[string]any) (*HelmChartSource, error) {
 	if cr.Spec.SourceRef.Name == "" {
 		return nil, inputf("HelmChart missing spec.sourceRef.name")
 	}
-	repoKind := cr.Spec.SourceRef.Kind
-	if repoKind == "" {
-		repoKind = KindHelmRepository
+	if cr.Spec.SourceRef.Kind == "" {
+		cr.Spec.SourceRef.Kind = KindHelmRepository
 	}
 	return &HelmChartSource{
-		Name:                     cr.Name,
-		Namespace:                ns,
-		Chart:                    cr.Spec.Chart,
-		Version:                  cr.Spec.Version,
-		RepoName:                 cr.Spec.SourceRef.Name,
-		RepoNamespace:            ns,
-		RepoKind:                 repoKind,
-		Suspend:                  cr.Spec.Suspend,
-		ValuesFiles:              cr.Spec.ValuesFiles,
-		IgnoreMissingValuesFiles: cr.Spec.IgnoreMissingValuesFiles,
-		ReconcileStrategy:        cr.Spec.ReconcileStrategy,
+		Name:           cr.Name,
+		Namespace:      ns,
+		HelmChartSpec:  cr.Spec,
 	}, nil
 }
 
-// HelmRelease is the Flux HelmRelease CRD.
+// HelmRelease is the Flux HelmRelease CRD. The embedded
+// helmv2.HelmReleaseSpec promotes Suspend, TargetNamespace,
+// ServiceAccountName, StorageNamespace, ReleaseName (as a field),
+// Install, Upgrade, ValuesFrom, PostRenderers, KubeConfig,
+// MaxHistory, etc. to the top level.
+//
+// Several flate-specific projection fields live alongside the
+// embedded Spec:
+//   - Chart is the union of spec.chart and spec.chartRef (the
+//     upstream's Spec.Chart and Spec.ChartRef are dropped via
+//     shadowing — accessible via h.HelmReleaseSpec.Chart if needed).
+//   - Values is the decoded form of spec.values (map[string]any) so
+//     consumers don't have to JSON-decode on every access.
+//   - DependsOn is normalized to []DependencyRef (with ReadyExpr).
+//   - CRDsPolicy collapses spec.install.crds vs spec.upgrade.crds.
+//   - DisableSchema/OpenAPIValidation collapse Install vs Upgrade.
+//   - ChartValuesFiles + IgnoreMissingValuesFiles are sourced from
+//     spec.chart.spec.valuesFiles OR the referenced HelmChart CRD.
 type HelmRelease struct {
-	Name                     string            `json:"name" yaml:"name"`
-	Namespace                string            `json:"namespace" yaml:"namespace"`
-	Chart                    HelmChart         `json:"chart" yaml:"chart"`
-	// ReleaseNameOverride holds spec.releaseName when set. Empty means
-	// helm-controller defaults to metadata.name. Use ReleaseName() to
-	// resolve.
-	ReleaseNameOverride      string            `json:"-" yaml:"-"`
-	TargetNamespace          string            `json:"-" yaml:"-"`
-	Values                   map[string]any    `json:"-" yaml:"-"`
-	ValuesFrom               []ValuesReference `json:"-" yaml:"-"`
-	Images                   []string          `json:"images,omitempty" yaml:"images,omitempty"`
-	Labels                   map[string]string `json:"-" yaml:"-"`
-	DependsOn                []DependencyRef   `json:"-" yaml:"-"`
-	Suspend                  bool              `json:"-" yaml:"-"`
-	DisableSchemaValidation  bool              `json:"-" yaml:"-"`
-	DisableOpenAPIValidation bool              `json:"-" yaml:"-"`
-	// CRDsPolicy mirrors spec.install.crds / spec.upgrade.crds. One of
-	// "" (chart's helm default), "Skip", "Create", "CreateReplace".
-	// "Skip" suppresses CRDs from the rendered output. "Create" and
-	// "CreateReplace" both include CRDs — they differ only in
-	// cluster-apply semantics which flate doesn't perform.
+	Name      string `json:"name"      yaml:"name"`
+	Namespace string `json:"namespace" yaml:"namespace"`
+
+	helmv2.HelmReleaseSpec `json:",inline" yaml:",inline"`
+
+	// Chart is the resolved chart reference, unifying spec.chart and
+	// spec.chartRef into one shape. Shadows the embedded Spec.Chart.
+	Chart HelmChart `json:"chart" yaml:"chart"`
+
+	// Values is the decoded form of spec.values. Shadows the embedded
+	// Spec.Values (*apiextensionsv1.JSON).
+	Values map[string]any `json:"-" yaml:"-"`
+
+	// DependsOn is the normalized form of spec.dependsOn (carrying any
+	// ReadyExpr). Shadows the embedded Spec.DependsOn ([]DependencyReference).
+	DependsOn []DependencyRef `json:"-" yaml:"-"`
+
+	Images []string          `json:"images,omitempty" yaml:"images,omitempty"`
+	Labels map[string]string `json:"-"                yaml:"-"`
+
+	// CRDsPolicy collapses spec.install.crds vs spec.upgrade.crds. One
+	// of "" (chart's helm default), "Skip", "Create", "CreateReplace".
 	// Upgrade wins over Install when both are set, matching
 	// helm-controller's "upgrade-after-install" model.
 	CRDsPolicy string `json:"-" yaml:"-"`
-	// ServiceAccountName is the SA Flux's helm-controller impersonates
-	// when applying the release. Flate renders offline so it has no
-	// effect here, but the field is preserved for fidelity with the
-	// upstream CR and so future render-time policy checks can observe it.
-	ServiceAccountName string `json:"-" yaml:"-"`
+
+	// DisableSchemaValidation / DisableOpenAPIValidation collapse the
+	// install vs upgrade equivalents into single flags.
+	DisableSchemaValidation  bool `json:"-" yaml:"-"`
+	DisableOpenAPIValidation bool `json:"-" yaml:"-"`
+
 	// ChartValuesFiles are values files baked into the chart that
-	// should be merged BEFORE the HR's own Values overrides. Sourced
-	// from either spec.chart.spec.valuesFiles (inline template) or the
-	// referenced HelmChart CRD's spec.valuesFiles (when chartRef is
-	// used; populated by ResolveChartRef).
-	ChartValuesFiles []string `json:"-" yaml:"-"`
-	// IgnoreMissingValuesFiles: when true, missing ChartValuesFiles
-	// entries are skipped instead of erroring.
-	IgnoreMissingValuesFiles bool `json:"-" yaml:"-"`
-	// PostRenderers are the spec.postRenderers entries applied to the
-	// rendered chart output, mirroring helm-controller's behavior. Each
-	// renderer is a kustomize-based patch+image transform.
-	PostRenderers []helmv2.PostRenderer `json:"-" yaml:"-"`
+	// should be merged BEFORE the HR's own Values overrides.
+	ChartValuesFiles         []string `json:"-" yaml:"-"`
+	IgnoreMissingValuesFiles bool     `json:"-" yaml:"-"`
 }
 
 // Named identifies the release.
@@ -221,8 +222,8 @@ func (h *HelmRelease) Named() NamedResource {
 // when set, otherwise metadata.name. Mirrors helm-controller's behavior
 // at template time. Always non-empty.
 func (h *HelmRelease) ReleaseName() string {
-	if h.ReleaseNameOverride != "" {
-		return h.ReleaseNameOverride
+	if h.HelmReleaseSpec.ReleaseName != "" {
+		return h.HelmReleaseSpec.ReleaseName
 	}
 	return h.Name
 }
@@ -351,40 +352,36 @@ func ParseHelmRelease(doc map[string]any) (*HelmRelease, error) {
 		ignoreMissingValuesFiles = cr.Spec.Chart.Spec.IgnoreMissingValuesFiles
 	}
 
+	// Ensure ValuesFrom is a defensive clone — Spec is embedded by
+	// value so this is the only slice that could escape via aliasing.
+	cr.Spec.ValuesFrom = vfs
+	cr.Spec.PostRenderers = slices.Clone(cr.Spec.PostRenderers)
+
 	return &HelmRelease{
 		Name:                     cr.Name,
 		Namespace:                cr.Namespace,
+		HelmReleaseSpec:          cr.Spec,
 		Chart:                    chart,
-		ReleaseNameOverride:      cr.Spec.ReleaseName,
-		PostRenderers:            slices.Clone(cr.Spec.PostRenderers),
-		TargetNamespace:          cr.Spec.TargetNamespace,
 		Values:                   values,
-		ValuesFrom:               vfs,
-		Labels:                   cr.Labels,
 		DependsOn:                dependsOn,
-		Suspend:                  cr.Spec.Suspend,
+		Labels:                   cr.Labels,
 		DisableSchemaValidation:  disableSchema,
 		DisableOpenAPIValidation: disableOpenAPI,
 		ChartValuesFiles:         chartValuesFiles,
 		IgnoreMissingValuesFiles: ignoreMissingValuesFiles,
-		ServiceAccountName:       cr.Spec.ServiceAccountName,
 		CRDsPolicy:               crdsPolicy,
 	}, nil
 }
 
-// HelmRepository is the Flux HelmRepository CRD.
+// HelmRepository is the Flux HelmRepository CRD. The embedded
+// sourcev1.HelmRepositorySpec promotes URL, Type, Provider, SecretRef,
+// CertSecretRef, PassCredentials, Insecure, Suspend, etc. to the top
+// level so consumers write h.URL / h.Type rather than h.Spec.URL.
 type HelmRepository struct {
-	Name      string `json:"name" yaml:"name"`
+	Name      string `json:"name"      yaml:"name"`
 	Namespace string `json:"namespace" yaml:"namespace"`
-	URL       string `json:"url" yaml:"url"`
-	// RepoType is "default" or "oci".
-	RepoType        string                `json:"repoType,omitempty" yaml:"repoType,omitempty"`
-	Provider        string                `json:"provider,omitempty" yaml:"provider,omitempty"`
-	SecretRef       *LocalObjectReference `json:"secretRef,omitempty" yaml:"secretRef,omitempty"`
-	CertSecretRef   *LocalObjectReference `json:"certSecretRef,omitempty" yaml:"certSecretRef,omitempty"`
-	PassCredentials bool                  `json:"-" yaml:"-"`
-	Insecure        bool                  `json:"-" yaml:"-"`
-	Suspend         bool                  `json:"-" yaml:"-"`
+
+	sourcev1.HelmRepositorySpec `json:",inline" yaml:",inline"`
 }
 
 // Named identifies the repo.
@@ -398,7 +395,7 @@ func (h *HelmRepository) RepoName() string { return h.Namespace + "-" + h.Name }
 // HelmChartName returns the chart ref used with the helm SDK. For OCI
 // repos the chart name is appended to the URL.
 func (h *HelmRepository) HelmChartName(chart HelmChart) string {
-	if h.RepoType == RepoTypeOCI {
+	if h.Type == RepoTypeOCI {
 		return h.URL + "/" + chart.Name
 	}
 	return chart.ChartName()
@@ -420,25 +417,12 @@ func ParseHelmRepository(doc map[string]any) (*HelmRepository, error) {
 	if cr.Spec.URL == "" {
 		return nil, inputf("HelmRepository missing spec.url")
 	}
-	repoType := cr.Spec.Type
-	if repoType == "" {
-		repoType = RepoTypeDefault
+	if cr.Spec.Type == "" {
+		cr.Spec.Type = RepoTypeDefault
 	}
-	out := &HelmRepository{
-		Name:            cr.Name,
-		Namespace:       cr.Namespace,
-		URL:             cr.Spec.URL,
-		RepoType:        repoType,
-		Provider:        cr.Spec.Provider,
-		PassCredentials: cr.Spec.PassCredentials,
-		Insecure:        cr.Spec.Insecure,
-		Suspend:         cr.Spec.Suspend,
-	}
-	if cr.Spec.SecretRef != nil && cr.Spec.SecretRef.Name != "" {
-		out.SecretRef = cr.Spec.SecretRef
-	}
-	if cr.Spec.CertSecretRef != nil && cr.Spec.CertSecretRef.Name != "" {
-		out.CertSecretRef = cr.Spec.CertSecretRef
-	}
-	return out, nil
+	return &HelmRepository{
+		Name:               cr.Name,
+		Namespace:          cr.Namespace,
+		HelmRepositorySpec: cr.Spec,
+	}, nil
 }

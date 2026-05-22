@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 )
 
 // mustYAML decodes a single YAML document literal into a generic map.
@@ -213,14 +215,14 @@ spec:
 			if err != nil {
 				t.Fatalf("ParseGitRepository: %v", err)
 			}
-			if g.Verify == nil {
+			if g.Verification == nil {
 				t.Fatalf("expected Verify parsed")
 			}
-			if g.Verify.Mode != tc.want {
-				t.Errorf("Mode = %q, want %q", g.Verify.Mode, tc.want)
+			if string(g.Verification.Mode) != tc.want {
+				t.Errorf("Mode = %q, want %q", g.Verification.Mode, tc.want)
 			}
-			if g.Verify.SecretRef == nil || g.Verify.SecretRef.Name != "trusted-pgp-keys" {
-				t.Errorf("SecretRef = %+v", g.Verify.SecretRef)
+			if g.Verification.SecretRef.Name != "trusted-pgp-keys" {
+				t.Errorf("SecretRef = %+v", g.Verification.SecretRef)
 			}
 		})
 	}
@@ -325,14 +327,14 @@ spec:
 	if err != nil {
 		t.Fatalf("ParseGitRepository: %v", err)
 	}
-	if g.Ref.Name != "refs/pull/420/head" {
-		t.Errorf("Ref.Name = %q", g.Ref.Name)
+	if g.Reference == nil || g.Reference.Name != "refs/pull/420/head" {
+		t.Errorf("Reference.Name = %q", g.Reference)
 	}
 	if !g.RecurseSubmodules {
 		t.Errorf("RecurseSubmodules should be true")
 	}
-	if want := "name:refs/pull/420/head"; GitRefString(g.Ref) != want {
-		t.Errorf("RefString = %q, want %q", GitRefString(g.Ref), want)
+	if want := "name:refs/pull/420/head"; GitRefString(*g.Reference) != want {
+		t.Errorf("RefString = %q, want %q", GitRefString(*g.Reference), want)
 	}
 }
 
@@ -583,8 +585,8 @@ spec:
 	if err != nil {
 		t.Fatalf("ParseHelmRelease: %v", err)
 	}
-	if hr.ReleaseNameOverride != "my-explicit-release" {
-		t.Errorf("ReleaseNameOverride = %q, want my-explicit-release", hr.ReleaseNameOverride)
+	if hr.HelmReleaseSpec.ReleaseName != "my-explicit-release" {
+		t.Errorf("HelmReleaseSpec.ReleaseName = %q, want my-explicit-release", hr.HelmReleaseSpec.ReleaseName)
 	}
 	if got := hr.ReleaseName(); got != "my-explicit-release" {
 		t.Errorf("ReleaseName() with override = %q, want my-explicit-release", got)
@@ -614,9 +616,12 @@ spec:
 
 	src := &HelmChartSource{
 		Name: "my-chart", Namespace: "flux-system",
-		Chart: "podinfo", Version: "6.3.2",
-		RepoName: "podinfo", RepoNamespace: "flux-system",
-		RepoKind: KindHelmRepository,
+		HelmChartSpec: sourcev1.HelmChartSpec{
+			Chart: "podinfo", Version: "6.3.2",
+			SourceRef: sourcev1.LocalHelmChartSourceReference{
+				Name: "podinfo", Kind: KindHelmRepository,
+			},
+		},
 	}
 	if err := hr.ResolveChartRef(map[string]*HelmChartSource{src.ResourceFullName(): src}); err != nil {
 		t.Fatalf("ResolveChartRef: %v", err)
@@ -646,8 +651,8 @@ spec:
 	if err != nil {
 		t.Fatalf("ParseHelmRepository: %v", err)
 	}
-	if r.RepoType != "oci" {
-		t.Errorf("RepoType = %q", r.RepoType)
+	if r.Type != "oci" {
+		t.Errorf("RepoType = %q", r.Type)
 	}
 	if got, want := r.HelmChartName(HelmChart{Name: "podinfo"}), "oci://ghcr.io/stefanprodan/charts/podinfo"; got != want {
 		t.Errorf("HelmChartName = %q, want %q", got, want)
@@ -670,7 +675,10 @@ spec:
 	if err != nil {
 		t.Fatalf("ParseGitRepository: %v", err)
 	}
-	if got, want := GitRefString(g.Ref), "tag:v1.2.3"; got != want {
+	if g.Reference == nil {
+		t.Fatalf("expected Reference parsed")
+	}
+	if got, want := GitRefString(*g.Reference), "tag:v1.2.3"; got != want {
 		t.Errorf("RefString = %q, want %q", got, want)
 	}
 }
