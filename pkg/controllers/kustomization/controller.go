@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	yaml "go.yaml.in/yaml/v4"
+
 	"github.com/home-operations/flate/pkg/change"
 	"github.com/home-operations/flate/pkg/controllers/base"
 	"github.com/home-operations/flate/pkg/depwait"
@@ -119,26 +121,57 @@ func (c *Controller) reconcile(ctx context.Context, ks *manifest.Kustomization) 
 	if err != nil {
 		return err
 	}
-	if vars := values.VarsMap(ks.PostBuildSubstitute); len(vars) > 0 && kustomize.HasSubstitutions(data) {
-		data, err = kustomize.Substitute(data, vars)
-		if err != nil {
-			return err
-		}
-	}
-
 	docs, err := manifest.SplitDocs(data)
 	if err != nil {
 		return err
 	}
 
+	// Per-resource envsubst. Flux's kustomize-controller skips
+	// substitution on any resource carrying the
+	// "kustomize.toolkit.fluxcd.io/substitute: disabled" label or
+	// annotation — used in real repos for ConfigMaps that embed
+	// shell scripts with bash array expansions (${ARR[@]}) that
+	// envsubst's parser cannot handle. Mirror that behavior here:
+	// substitute per-doc, skip opted-out resources, so we match Flux
+	// bit-for-bit.
+	if vars := values.VarsMap(ks.PostBuildSubstitute); len(vars) > 0 {
+		for i, doc := range docs {
+			if manifest.HasSubstituteDisabled(doc) {
+				continue
+			}
+			substituted, sErr := substituteDoc(doc, vars)
+			if sErr != nil {
+				return sErr
+			}
+			docs[i] = substituted
+		}
+	}
+
 	c.Store.UpdateStatus(id, store.StatusPending, fmt.Sprintf("applying %d objects", len(docs)))
 	opts := manifest.ParseDocOptions{WipeSecrets: c.WipeSecrets}
-	var sopsRefs []string
+	// Two-pass emission. Pass 1 lands "data" kinds (ConfigMap, Secret,
+	// sources) into the store so child Kustomization / HelmRelease
+	// reconciles in pass 2 see a complete store — substituteFrom and
+	// chart-source lookups would race otherwise, since AddObject for a
+	// reconcilable kind fires its controller on a separate goroutine
+	// immediately. Within each pass the controller renders the docs in
+	// kustomize's emission order; passes themselves are ordered so the
+	// data backing a reconcile always arrives first.
+	type parsed struct {
+		obj         manifest.BaseManifest
+		reconcilable bool
+	}
+	objs := make([]parsed, 0, len(docs))
 	for _, doc := range docs {
 		if manifest.IsEncryptedSecret(doc) {
+			// flate can't decrypt SOPS offline. ParseSecret will wipe
+			// the encrypted values to PLACEHOLDER below — same as it
+			// does for cleartext Secret data when --wipe-secrets is on
+			// — so downstream substituteFrom lookups succeed with a
+			// clearly-marked placeholder rather than failing.
 			name, ns := manifest.DocMetadata(doc)
-			sopsRefs = append(sopsRefs, fmt.Sprintf("%s %s/%s", manifest.DocKind(doc), ns, name))
-			continue
+			slog.Debug("kustomization: SOPS-encrypted resource wiped to placeholder",
+				"id", id.String(), "ref", manifest.DocKind(doc)+" "+ns+"/"+name)
 		}
 		obj, err := manifest.ParseDoc(doc, opts)
 		if err != nil {
@@ -148,27 +181,30 @@ func (c *Controller) reconcile(ctx context.Context, ks *manifest.Kustomization) 
 			slog.Debug("kustomization: skipped doc", "id", id.String(), "err", err)
 			continue
 		}
-		// When a parent Kustomization renders a Flux resource that has
-		// its own controller (child Kustomization, HelmRelease, sources),
-		// route through AddObject so the rendered version (with patches,
-		// commonMetadata, targetNamespace, etc. applied) supersedes any
-		// statically-loaded copy and triggers a fresh reconcile.
-		// Non-reconcilable leaves keep the cheaper AddRendered path.
-		if shouldDispatchAsObject(obj) {
-			c.Store.AddObject(obj)
+		objs = append(objs, parsed{obj: obj, reconcilable: shouldDispatchAsObject(obj)})
+	}
+	// Pass 1 — data first. Sources go through AddObject because they
+	// have their own status to track; ConfigMap/Secret have no
+	// controller, so AddObject's event dispatch is a no-op for them.
+	// Either way they're in the store before pass 2 fires.
+	for _, p := range objs {
+		if p.reconcilable && isLeafReconcilable(p.obj) {
+			continue
+		}
+		if p.reconcilable {
+			c.Store.AddObject(p.obj)
+			c.Store.MarkRendered(p.obj.Named())
 		} else {
-			c.Store.AddRendered(obj)
+			c.Store.AddRendered(p.obj)
 		}
 	}
-	if len(sopsRefs) > 0 {
-		// Surface SOPS docs as the Kustomization's failure reason but
-		// keep the non-SOPS docs in the store so downstream consumers
-		// can still reconcile against the parts flate could render.
-		return fmt.Errorf(
-			"SOPS-encrypted resource(s) in rendered output: %s — flate does not implement spec.decryption; "+
-				"render against pre-decrypted manifests or remove the encrypted resource",
-			strings.Join(sopsRefs, ", "),
-		)
+	// Pass 2 — leaf reconcilables (Kustomization, HelmRelease). Their
+	// substituteFrom / chartRef lookups now see the data from pass 1.
+	for _, p := range objs {
+		if p.reconcilable && isLeafReconcilable(p.obj) {
+			c.Store.AddObject(p.obj)
+			c.Store.MarkRendered(p.obj.Named())
+		}
 	}
 
 	c.Store.SetArtifact(id, &store.KustomizationArtifact{
@@ -176,6 +212,30 @@ func (c *Controller) reconcile(ctx context.Context, ks *manifest.Kustomization) 
 		Manifests: docs,
 	})
 	return nil
+}
+
+// substituteDoc marshals a single manifest doc, runs envsubst over it,
+// and unmarshals the result back. Per-doc substitution (rather than
+// substitute-the-whole-blob) lets us honor Flux's
+// "kustomize.toolkit.fluxcd.io/substitute: disabled" opt-out, which is
+// scoped to individual resources.
+func substituteDoc(doc map[string]any, vars map[string]string) (map[string]any, error) {
+	raw, err := yaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("substitute: marshal doc: %w", err)
+	}
+	if !kustomize.HasSubstitutions(raw) {
+		return doc, nil
+	}
+	out, err := kustomize.Substitute(raw, vars)
+	if err != nil {
+		return nil, err
+	}
+	var next map[string]any
+	if err := yaml.Unmarshal(out, &next); err != nil {
+		return nil, fmt.Errorf("substitute: unmarshal doc: %w", err)
+	}
+	return next, nil
 }
 
 // shouldDispatchAsObject reports whether a render-emitted Flux
@@ -197,6 +257,19 @@ func shouldDispatchAsObject(obj manifest.BaseManifest) bool {
 		*manifest.ExternalArtifact,
 		*manifest.ConfigMap,
 		*manifest.Secret:
+		return true
+	}
+	return false
+}
+
+// isLeafReconcilable reports whether an emitted object should be held
+// for pass 2. Kustomization + HelmRelease have controllers that fire
+// substituteFrom / chartRef lookups against the store the instant
+// their AddObject event arrives; emitting them after all "data" kinds
+// guarantees those lookups succeed.
+func isLeafReconcilable(obj manifest.BaseManifest) bool {
+	switch obj.(type) {
+	case *manifest.Kustomization, *manifest.HelmRelease:
 		return true
 	}
 	return false
