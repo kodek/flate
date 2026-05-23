@@ -3,11 +3,9 @@
 name: Release
 
 on:
-  push:
-    # Org enforces release immutability — goreleaser owns the release as a
-    # draft; the final job flips it to published.
-    tags:
-      - "*"
+  release:
+    types:
+      - published
 
 jobs:
   build:
@@ -221,18 +219,3 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ steps.tap-token.outputs.token }}
-
-  publish:
-    name: Publish Release
-    runs-on: ubuntu-latest
-    needs:
-      - attest
-      - goreleaser
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ github.ref_name }}
-    steps:
-      - name: Mark release as published
-        run: gh release edit "$TAG" --draft=false --repo "${{ github.repository }}"

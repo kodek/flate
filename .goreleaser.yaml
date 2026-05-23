@@ -82,8 +82,7 @@ homebrew_casks:
         install: |
           system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/flate"] if OS.mac?
 
-# Org-enforced release immutability locks assets the moment a release is
-# published, so create the release as a draft (mutable) and let the workflow
-# flip it to published once all assets are uploaded.
+# release-please creates the GitHub Release with the changelog; goreleaser
+# attaches binaries/sboms/sigs to it.
 release:
-  draft: true
+  mode: keep-existing
