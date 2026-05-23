@@ -34,15 +34,20 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # skip-github-release leaves tagging to "existing infrastructure", so
-      # create the tag ref via API to trigger the release workflow.
+      # skip-github-release: true means release-please-action never sets
+      # release_created/tag_name, so gate on the merge commit message instead
+      # and push the tag ourselves to trigger the release workflow.
       - name: Push tag
-        if: steps.release.outputs.release_created == 'true'
+        if: "startsWith(github.event.head_commit.message, 'chore(main): release ')"
         env:
-          TAG: ${{ steps.release.outputs.tag_name }}
-          SHA: ${{ steps.release.outputs.sha }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |-
+          TAG=$(printf '%s' "$HEAD_MSG" | head -n1 | sed -nE 's/^chore\(main\): release ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+          if [ -z "$TAG" ]; then
+            echo "could not parse version from head commit message" >&2
+            exit 1
+          fi
           gh api --method POST "/repos/${GITHUB_REPOSITORY}/git/refs" \
             -f "ref=refs/tags/${TAG}" \
-            -f "sha=${SHA}"
+            -f "sha=${GITHUB_SHA}"
