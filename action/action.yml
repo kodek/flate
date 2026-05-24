@@ -53,9 +53,10 @@ runs:
         fi
 
         ARCH=$(echo "${RUNNER_ARCH}" | tr '[:upper:]' '[:lower:]')
-        if [[ "${ARCH}" == "x64" ]]; then
-          ARCH="amd64"
-        fi
+        case "${ARCH}" in
+          x64|x86_64) ARCH="amd64" ;;
+          aarch64) ARCH="arm64" ;;
+        esac
 
         EXEC="flate"
         ARCHIVE="flate_${VERSION}_${OS}_${ARCH}.tar.gz"
