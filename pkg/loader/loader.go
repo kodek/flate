@@ -1,3 +1,25 @@
+// Package loader hydrates a Store from on-disk Flux manifests.
+//
+// The loader's discovery model mirrors `kustomize build` (and
+// flux-local): the kustomize resource graph is the source of truth.
+// A directory with a kustomization.yaml defines a kustomize package
+// — the loader follows its `resources:` entries (files load,
+// directories recurse) and ignores everything else in the directory.
+// Files outside the resource graph are invisible by construction;
+// there is no "tree walk + filter" post-pass, no orphan-skip rule,
+// no reachability set computed up front.
+//
+// Entry points without a kustomization.yaml use a fall-back tree
+// walk that loads every YAML it finds and switches into graph-walk
+// mode when it encounters a subdirectory that IS a kustomize
+// package. This keeps the bootstrap-style "bare directory of CRs"
+// shape working without forcing every user to wrap their entry
+// point in a kustomization.yaml.
+//
+// Each loader.Load call is one independent graph root. The
+// orchestrator's iterative discovery — a Flux KS's spec.path
+// triggers another Load — composes naturally: each spec.path is its
+// own graph root with its own resource graph.
 package loader
 
 import (
@@ -5,8 +27,8 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/home-operations/flate/pkg/manifest"
@@ -70,13 +92,13 @@ func New(s *store.Store) *Loader {
 	return &Loader{Store: s, Options: Options{WipeSecrets: true}}
 }
 
-// Load walks root recursively, decoding every .yaml/.yml/.json document
-// and adding recognized Flux objects to the Store. Returns the count of
-// added objects.
+// Load discovers Flux objects under root by walking the kustomize
+// resource graph. When root has a kustomization.yaml it's treated as
+// a kustomize package and only files reachable through `resources:`
+// are loaded; when it has none, a recursive walk finds and enters
+// kustomize packages it encounters, loading every YAML otherwise.
 //
-// Honors ctx cancellation between directory entries — a stuck NFS
-// mount or symlink loop aborts cleanly instead of blocking the whole
-// orchestrator.
+// Honors ctx cancellation; visited-set protects against cycles.
 func (l *Loader) Load(ctx context.Context, root string) (int, error) {
 	if l.Store == nil {
 		return 0, errors.New("loader: Store is nil")
@@ -89,30 +111,142 @@ func (l *Loader) Load(ctx context.Context, root string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	w := walker{
+		loader:  l,
+		ignore:  ignore,
+		visited: map[string]struct{}{},
+	}
+	return w.descend(ctx, abs)
+}
 
-	// Pre-pass: decode every kustomization.yaml in the tree and
-	// collect (a) data files declared as generator inputs, (b) files
-	// declared as `resources:`, and (c) the directories that have a
-	// kustomization.yaml at all. The main walk applies three rules
-	// from this scan:
-	//
-	//   - skip generator data files (issue #192)
-	//   - skip "orphan" YAML files: a YAML in a directory governed by
-	//     a kustomization.yaml is loaded only when explicitly
-	//     referenced via `resources:`. Closes #342 — toggle stubs
-	//     left lying around next to a kustomization.yaml (a common
-	//     pattern: comment a `./vrising.yaml` line in resources to
-	//     disable that wrapper) were being discovered and reconciled
-	//     against the wrong namespace, since the parent overlay's
-	//     transforms never applied. kustomize build follows the
-	//     same graph; flate now matches that behavior.
-	scan, err := collectKustomizationScan(ctx, abs, ignore)
-	if err != nil {
-		return 0, err
+// walker carries the per-Load state — ignore matcher, visited-dir
+// dedup, loader back-reference — so the recursive functions don't
+// need to thread the same args through every call.
+type walker struct {
+	loader  *Loader
+	ignore  *ignoreSet
+	visited map[string]struct{}
+}
+
+// descend dispatches on the kind of directory dir is:
+//   - Kustomize Component: skipped entirely (transforms applied at
+//     render time, not loaded as standalone Flux CRs).
+//   - Kustomize package (has kustomization.yaml, kind != Component):
+//     follow the resource graph via walkKustomize.
+//   - Ad-hoc directory (no kustomization.yaml): walk the filesystem,
+//     loading every YAML and switching to walkKustomize on encounter
+//     of a sub-package.
+//   - Already-visited: no-op (cycle protection for circular
+//     `resources:` references).
+func (w *walker) descend(ctx context.Context, dir string) (int, error) {
+	if cerr := ctx.Err(); cerr != nil {
+		return 0, cerr
+	}
+	if _, seen := w.visited[dir]; seen {
+		return 0, nil
+	}
+	w.visited[dir] = struct{}{}
+
+	k := readKustomization(dir)
+	if k != nil {
+		if k.Kind == "Component" {
+			slog.Debug("loader: skipping kustomize Component directory", "dir", dir)
+			return 0, nil
+		}
+		return w.walkKustomize(ctx, dir, k)
+	}
+	return w.walkAdHoc(ctx, dir)
+}
+
+// walkKustomize traverses the kustomize resource graph rooted at dir.
+// File resources load via loadFile; directory resources recurse via
+// descend. configMapGenerator / secretGenerator data files are
+// excluded since they're consumed at render time, not loaded as
+// Flux manifests.
+//
+// kustomization.yaml itself is loadFile'd so parseFile can decide
+// whether it's a Flux Kustomization CR (different apiVersion than
+// kustomize's own Kustomization). If not, parseFile returns no
+// objects and the count is unchanged.
+//
+// patches / replacements / transformers / generators (the rest of
+// kustomize's directive fields) reference YAMLs that are kustomize
+// directives, NOT Flux manifests — they're not in `resources:` so
+// they don't load. Matches `kustomize build` precisely.
+func (w *walker) walkKustomize(ctx context.Context, dir string, k *kustomization) (int, error) {
+	dataFiles := dataFilesFor(dir, k)
+	count := 0
+
+	// Load the kustomization.yaml itself — preserves source-file
+	// visibility for any consumer that inspects on-disk shape, and
+	// lets parseFile recognize a Flux Kustomization that happens to
+	// be authored at the `kustomization.yaml` filename (rare but
+	// permitted).
+	if kpath, ok := kustomizationFilePath(dir); ok && !w.ignore.matches(kpath, dir) {
+		n, err := w.loader.loadFile(kpath)
+		if err != nil {
+			slog.Warn("loader: kustomization file failed to parse", "path", kpath, "err", err)
+		}
+		count += n
 	}
 
+	for _, r := range k.Resources {
+		if cerr := ctx.Err(); cerr != nil {
+			return count, cerr
+		}
+		abs, ok := resolveDataPath(dir, r)
+		if !ok {
+			// URL resources, paths escaping the package, malformed
+			// entries — kustomize handles these at render time;
+			// the loader's job is to ignore them at discovery time.
+			continue
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			// Resource pointer that doesn't exist on disk. Don't
+			// surface here; kustomize.RenderFlux will produce a
+			// clearer error with the right context at render time.
+			continue
+		}
+		if info.IsDir() {
+			n, err := w.descend(ctx, abs)
+			if err != nil {
+				return count, err
+			}
+			count += n
+			continue
+		}
+		if !isManifestFile(abs) {
+			continue
+		}
+		if _, isData := dataFiles[abs]; isData {
+			continue
+		}
+		if w.ignore.matches(abs, dir) {
+			continue
+		}
+		n, err := w.loader.loadFile(abs)
+		if err != nil {
+			slog.Warn("loader: file failed to parse", "path", abs, "err", err)
+			continue
+		}
+		count += n
+	}
+	return count, nil
+}
+
+// walkAdHoc handles entry points that aren't themselves kustomize
+// packages: walks the filesystem tree, loading every YAML, and
+// switching to walkKustomize when it encounters a sub-directory
+// that IS a kustomize package (the package's subtree is then
+// graph-walked and the filesystem walk skips it via SkipDir).
+//
+// This preserves flate's pre-#346 behavior for "bare directory of
+// flux CRs" entry shapes — e.g. a --path that doesn't have a
+// kustomization.yaml at its root.
+func (w *walker) walkAdHoc(ctx context.Context, root string) (int, error) {
 	count := 0
-	err = filepath.WalkDir(abs, func(path string, d fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
@@ -120,7 +254,25 @@ func (l *Loader) Load(ctx context.Context, root string) (int, error) {
 			return walkErr
 		}
 		if d.IsDir() {
-			if shouldSkipDir(d.Name(), path, abs, ignore) {
+			if shouldSkipDir(d.Name(), path, root, w.ignore) {
+				return filepath.SkipDir
+			}
+			if path == root {
+				return nil
+			}
+			// Subdirectory: if it's a kustomize package, switch to
+			// graph walk and SkipDir to keep filepath.WalkDir from
+			// descending again.
+			if k := readKustomization(path); k != nil {
+				if k.Kind == "Component" {
+					return filepath.SkipDir
+				}
+				w.visited[path] = struct{}{}
+				n, err := w.walkKustomize(ctx, path, k)
+				if err != nil {
+					return err
+				}
+				count += n
 				return filepath.SkipDir
 			}
 			return nil
@@ -128,47 +280,18 @@ func (l *Loader) Load(ctx context.Context, root string) (int, error) {
 		if !isManifestFile(path) {
 			return nil
 		}
-		if ignore.matches(path, abs) {
+		if w.ignore.matches(path, root) {
 			return nil
 		}
-		if _, isData := scan.DataFiles[path]; isData {
-			// Declared as configMapGenerator/secretGenerator data by
-			// a kustomization.yaml in the tree. krusty handles the
-			// file correctly at render time; the loader's job is to
-			// stay out of the way.
-			slog.Debug("loader: skipping generator data file", "path", path)
-			return nil
-		}
-		if orphan := isOrphanYAML(path, scan); orphan {
-			// Orphan: this YAML lives in a directory governed by a
-			// kustomization.yaml but isn't referenced via the
-			// `resources:` list. kustomize build wouldn't include it;
-			// flate now matches that. Common shape: a disabled toggle
-			// stub like `./vrising.yaml` left in the directory after
-			// a maintainer commented out the line in `resources:`.
-			slog.Debug("loader: skipping orphan YAML not referenced in parent kustomization.yaml", "path", path)
-			return nil
-		}
-		n, err := l.loadFile(path)
+		n, err := w.loader.loadFile(path)
 		if err != nil {
-			// `templates/`, `crds/`, and ignore-matched paths never
-			// reach here — they're SkipDir'd in shouldSkipDir. A YAML
-			// syntax error at a path the loader DID try to parse is a
-			// real user-side problem (typo'd manifest, half-edited
-			// CRD); promote to WARN so it isn't invisible at default
-			// log level. The per-doc kind-mismatch case below stays at
-			// Debug because raw k8s manifests interspersed with Flux
-			// CRs are a legitimate pattern.
 			slog.Warn("loader: file failed to parse", "path", path, "err", err)
 			return nil
 		}
 		count += n
 		return nil
 	})
-	if err != nil {
-		return count, err
-	}
-	return count, nil
+	return count, err
 }
 
 func (l *Loader) loadFile(path string) (int, error) {
@@ -264,6 +387,9 @@ func isManifestFile(path string) bool {
 	return ok
 }
 
+// shouldSkipDir applies the ad-hoc walk's directory-prune rules.
+// Not used by walkKustomize — that path follows explicit resource
+// entries and trusts the user's kustomize manifests.
 func shouldSkipDir(name, full, root string, ignore *ignoreSet) bool {
 	switch name {
 	case ".git", "node_modules", ".cache":
@@ -279,51 +405,18 @@ func shouldSkipDir(name, full, root string, ignore *ignoreSet) bool {
 	if ignore.matchesDir(full, root) {
 		return true
 	}
-	// A `kind: Component` kustomization.yaml means everything below is a
-	// template fragment that real Flux only materializes via a parent
-	// Kustomization's spec.components reference. Standalone-loading the
-	// children would surface literal `${APP}` placeholders in metadata
-	// names as bogus Kustomization / HelmRelease objects. The parent's
-	// kustomize render still picks them up — it follows spec.components
-	// directly without going through flate's standalone loader.
-	return isKustomizeComponent(full)
+	return false
 }
 
-// isKustomizeComponent reports whether dir contains a kustomization
-// file declaring `kind: Component`. Catches YAML, JSON, and terse
-// no-space-after-colon shapes that a substring check would miss.
-func isKustomizeComponent(dir string) bool {
-	k := readKustomization(dir)
-	return k != nil && k.Kind == "Component"
-}
-
-// isOrphanYAML reports whether path should be skipped by the main
-// loader walk because it's an unreferenced YAML in a directory
-// governed by a kustomization.yaml. The rule:
-//
-//   - If the path's directory does NOT have a kustomization.yaml,
-//     the file is loaded normally (e.g. --path entry points, the
-//     bootstrap dir before the first overlay).
-//   - The kustomization.yaml file itself always loads.
-//   - Files explicitly listed in the kustomization.yaml's
-//     `resources:` always load.
-//   - Everything else in the same directory is "orphan" — toggle
-//     stubs, kustomize patches, `replacements:` payloads — and is
-//     skipped. Patches/replacements would parse as RawObject and
-//     get filtered downstream anyway; toggle stubs (the #342 case)
-//     would parse as a Flux Kustomization and reconcile against
-//     the wrong overlay state.
-//
-// Mirrors kustomize build's graph traversal: only the transitive
-// closure of `resources:` (+ generators) ends up rendered.
-func isOrphanYAML(path string, scan *kustomizationScan) bool {
-	dir := filepath.Dir(path)
-	if _, ok := scan.KustomizationDirs[dir]; !ok {
-		return false
+// kustomizationFilePath returns the absolute path of dir's
+// kustomization.{yaml,yml,json} (first match wins, matching kustomize's
+// own filename precedence). Returns ("", false) when none exists.
+func kustomizationFilePath(dir string) (string, bool) {
+	for _, name := range kustomizationFileNames {
+		p := filepath.Join(dir, name)
+		if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() {
+			return p, true
+		}
 	}
-	if slices.Contains(kustomizationFileNames, filepath.Base(path)) {
-		return false
-	}
-	_, claimed := scan.ClaimedResources[path]
-	return !claimed
+	return "", false
 }

@@ -1,12 +1,8 @@
 package loader
 
 import (
-	"context"
-	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -61,108 +57,54 @@ func readKustomization(dir string) *kustomization {
 	return nil
 }
 
-// kustomizationScan is the result of walking the tree once to inspect
-// every kustomization.yaml the loader cares about. The fields cover
-// the three exclusion/inclusion rules the main walk applies:
+// dataFilesFor returns the set of file paths declared as
+// configMapGenerator/secretGenerator data in k, resolved against
+// dir. The caller's walkKustomize uses this to exclude generator
+// inputs from the resource-scan — kustomize reads them at render
+// time and they aren't Flux manifests.
 //
-//   - DataFiles: configMapGenerator / secretGenerator file paths.
-//     Skipped because they're YAML/env data the chart loader handles
-//     at render time, not Flux manifests.
-//   - ClaimedResources: absolute paths declared in some
-//     kustomization.yaml's resources list. Authoritative "this IS a
-//     Flux manifest" inclusions — they survive the orphan-skip check
-//     even if they happen to share a dir with other YAML.
-//   - KustomizationDirs: directories that contain a kustomization.yaml
-//     file. Used by the orphan check: a YAML file in a directory
-//     governed by a kustomization.yaml must be referenced as a
-//     resource to be loaded.
-type kustomizationScan struct {
-	DataFiles         map[string]struct{}
-	ClaimedResources  map[string]struct{}
-	KustomizationDirs map[string]struct{}
-}
-
-// collectKustomizationScan walks root and decodes every
-// kustomization.yaml it finds, building the three sets the main
-// loader uses to decide which YAML files to parse.
-//
-// Files declared as configMapGenerator/secretGenerator data are
-// captured separately from files declared as resources. When a path
-// appears in BOTH lists across the tree, the resource interpretation
-// wins (the data exclusion is dropped) — kustomize doesn't forbid
-// the duplication and the resource declaration is the more
-// authoritative "this IS a Flux manifest" signal.
-//
-// Honors ctx cancellation and the same shouldSkipDir rules as the
-// main walk so we don't descend into `.git`, `templates/`, Component
-// dirs, or ignore-matched paths.
-func collectKustomizationScan(ctx context.Context, root string, ignore *ignoreSet) (*kustomizationScan, error) {
-	scan := &kustomizationScan{
-		DataFiles:         map[string]struct{}{},
-		ClaimedResources:  map[string]struct{}{},
-		KustomizationDirs: map[string]struct{}{},
-	}
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			if shouldSkipDir(d.Name(), path, root, ignore) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !slices.Contains(kustomizationFileNames, d.Name()) {
-			return nil
-		}
-		k := readKustomization(filepath.Dir(path))
-		if k == nil {
-			return nil
-		}
-		base := filepath.Dir(path)
-		scan.KustomizationDirs[base] = struct{}{}
-		for _, r := range k.Resources {
-			if abs, ok := resolveDataPath(base, r); ok {
-				scan.ClaimedResources[abs] = struct{}{}
-			}
-		}
-		addEntries := func(entries []string, parseKey bool) {
-			for _, e := range entries {
-				p := e
-				if parseKey {
-					p = stripFileEntryKey(e)
-				}
-				if abs, ok := resolveDataPath(base, p); ok {
-					scan.DataFiles[abs] = struct{}{}
-				}
-			}
-		}
-		for _, g := range k.ConfigMapGenerator {
-			addEntries(g.Files, true)
-			addEntries(g.Envs, false)
-		}
-		for _, g := range k.SecretGenerator {
-			addEntries(g.Files, true)
-			addEntries(g.Envs, false)
-		}
+// When a path appears in both the generator list AND k.Resources,
+// the resource interpretation wins (the data exclusion is dropped):
+// kustomize doesn't forbid the overlap, and the resource
+// declaration is the more authoritative "this IS a Flux manifest"
+// signal. The overlap-resolve runs per-kustomization, scoped to one
+// directory — there's no cross-tree state to manage anymore.
+func dataFilesFor(dir string, k *kustomization) map[string]struct{} {
+	if k == nil || (len(k.ConfigMapGenerator) == 0 && len(k.SecretGenerator) == 0) {
 		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
-	// Resource interpretation wins over data interpretation if the same
-	// path appears in both lists across any kustomization.yaml in the
-	// tree.
-	for r := range scan.ClaimedResources {
-		delete(scan.DataFiles, r)
+	resources := map[string]struct{}{}
+	for _, r := range k.Resources {
+		if abs, ok := resolveDataPath(dir, r); ok {
+			resources[abs] = struct{}{}
+		}
 	}
-	if len(scan.DataFiles) > 0 {
-		slog.Debug("loader: data files excluded from manifest scan", "count", len(scan.DataFiles))
+	data := map[string]struct{}{}
+	addEntries := func(entries []string, parseKey bool) {
+		for _, e := range entries {
+			p := e
+			if parseKey {
+				p = stripFileEntryKey(e)
+			}
+			abs, ok := resolveDataPath(dir, p)
+			if !ok {
+				continue
+			}
+			if _, isRes := resources[abs]; isRes {
+				continue
+			}
+			data[abs] = struct{}{}
+		}
 	}
-	return scan, nil
+	for _, g := range k.ConfigMapGenerator {
+		addEntries(g.Files, true)
+		addEntries(g.Envs, false)
+	}
+	for _, g := range k.SecretGenerator {
+		addEntries(g.Files, true)
+		addEntries(g.Envs, false)
+	}
+	return data
 }
 
 // stripFileEntryKey returns the path portion of a kustomize
