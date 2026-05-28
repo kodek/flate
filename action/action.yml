@@ -1,7 +1,7 @@
 ---
 # yaml-language-server: $schema=https://json.schemastore.org/github-action.json
 name: Setup flate CLI
-description: Install the flate CLI via mise and optionally cache its on-disk store between runs
+description: Install the flate CLI from GitHub releases and optionally cache its on-disk store between runs
 author: home-operations
 branding:
   color: purple
@@ -16,13 +16,17 @@ inputs:
     required: false
     default: ""
   token:
-    description: GitHub token used by mise to resolve and download releases without hitting unauthenticated rate limits
+    description: GitHub token used to resolve releases and avoid unauthenticated rate limits on the GitHub API
     required: false
     default: ${{ github.token }}
   cache:
     description: Restore and save flate's XDG cache (sources, helm charts, git mirrors, blobs) between runs
     required: false
     default: "false"
+  bindir:
+    description: Alternative install location for the flate binary; defaults to a path under $RUNNER_TOOL_CACHE
+    required: false
+    default: ""
 
 outputs:
   version:
@@ -54,12 +58,13 @@ runs:
         semver='^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
 
         # Resolve which flate version to install. Precedence:
-        #   1. explicit `version:` input
+        #   1. explicit `version:` input (including the literal "latest")
         #   2. action ref is a SemVer tag (@0.1.26, @v0.1.26)
         #   3. action ref is a commit SHA whose commit a SemVer tag points at
         #      (looked up via the GitHub tags API on the action's own repo —
         #       supports the SHA-pinning security pattern)
-        #   4. "latest"
+        #   4. "latest" — resolved against the releases API (with token) or the
+        #      HTTP redirect on /releases/latest (without)
         version="${INPUT_VERSION}"
         from=""
 
@@ -84,10 +89,26 @@ runs:
           fi
         fi
 
-        if [[ -z "${version}" ]]; then
-          version="latest"
-          from="default (action ref \"${ACTION_REF:-<none>}\" is not a release tag)"
+        # Unresolved (empty or literal "latest") → query the releases endpoint for a concrete tag.
+        if [[ -z "${version}" || "${version}" == "latest" ]]; then
+          if [[ -n "${INPUT_TOKEN}" ]] && command -v jq >/dev/null; then
+            version=$(curl -fsSL \
+                -H "Authorization: Bearer ${INPUT_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/repos/home-operations/flate/releases/latest \
+              | jq -r .tag_name)
+          else
+            version=$(curl -w '%{url_effective}\n' -IsSL \
+              https://github.com/home-operations/flate/releases/latest \
+              -o /dev/null | sed 's|^.*/||')
+          fi
+          from="${from:-default} (resolved \"latest\" → ${version})"
         fi
+        if [[ -z "${version}" ]]; then
+          echo "Unable to determine flate version"
+          exit 1
+        fi
+        version="${version#v}"
         echo "resolved flate version: ${version} (from ${from})"
 
         # Cache dir: mirrors Go's os.UserCacheDir() — the path flate's cacheroot.Default() resolves to.
@@ -112,14 +133,88 @@ runs:
         restore-keys: |
           flate-${{ runner.os }}-${{ runner.arch }}-
 
-    - name: Install flate
-      uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+    - name: Download flate
+      shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.token }}
-      with:
-        cache: false
-        tool_versions: |
-          github:home-operations/flate ${{ steps.resolve.outputs.version }}
+        VERSION: ${{ steps.resolve.outputs.version }}
+        FLATE_TOOL_DIR: ${{ inputs.bindir }}
+      run: | # zizmor: ignore[github-env] FLATE_TOOL_DIR is composed of controlled inputs and runner-provided paths; adding to PATH is the action's contract
+        set -euo pipefail
+
+        OS=$(echo "${RUNNER_OS}" | tr '[:upper:]' '[:lower:]')
+        if [[ "${OS}" == "macos" ]]; then
+          OS="darwin"
+        fi
+
+        ARCH=$(echo "${RUNNER_ARCH}" | tr '[:upper:]' '[:lower:]')
+        case "${ARCH}" in
+          x64|x86_64) ARCH="amd64" ;;
+          aarch64) ARCH="arm64" ;;
+        esac
+
+        EXEC="flate"
+        ARCHIVE="flate_${VERSION}_${OS}_${ARCH}.tar.gz"
+        if [[ "${OS}" == "windows" ]]; then
+          EXEC="flate.exe"
+          ARCHIVE="flate_${VERSION}_${OS}_${ARCH}.zip"
+        fi
+
+        if [[ -z "${FLATE_TOOL_DIR}" ]]; then
+          FLATE_TOOL_DIR="${RUNNER_TOOL_CACHE}/flate/${VERSION}/${OS}/${ARCH}"
+        fi
+
+        if [[ ! -x "${FLATE_TOOL_DIR}/${EXEC}" ]]; then
+          DL_DIR="$(mktemp -dt flate-XXXXXX)"
+          trap 'rm -rf "${DL_DIR}"' EXIT
+
+          BASE_URL="https://github.com/home-operations/flate/releases/download/${VERSION}"
+
+          max_retries=5
+          retry_delay=5
+          download() {
+            local url=$1 dest=$2 attempt
+            for attempt in $(seq 1 ${max_retries}); do
+              echo "Downloading ${url} (attempt ${attempt}/${max_retries})"
+              if curl -fsSL -o "${dest}" "${url}"; then
+                return 0
+              fi
+              if [[ ${attempt} -lt ${max_retries} ]]; then
+                sleep ${retry_delay}
+              fi
+            done
+            echo "Failed to download ${url} after ${max_retries} attempts"
+            return 1
+          }
+
+          download "${BASE_URL}/${ARCHIVE}" "${DL_DIR}/${ARCHIVE}"
+          download "${BASE_URL}/${ARCHIVE}.sha256" "${DL_DIR}/${ARCHIVE}.sha256"
+
+          echo "Verifying checksum"
+          if command -v sha256sum > /dev/null; then
+            sum=$(sha256sum "${DL_DIR}/${ARCHIVE}" | awk '{print $1}')
+          elif command -v openssl > /dev/null; then
+            sum=$(openssl sha256 "${DL_DIR}/${ARCHIVE}" | awk '{print $2}')
+          else
+            echo "Neither sha256sum nor openssl found"
+            exit 1
+          fi
+          expected=$(awk '{print $1}' "${DL_DIR}/${ARCHIVE}.sha256")
+          if [[ "${sum}" != "${expected}" ]]; then
+            echo "Checksum mismatch for ${ARCHIVE}: got ${sum}, expected ${expected}"
+            exit 1
+          fi
+
+          echo "Installing flate to ${FLATE_TOOL_DIR}"
+          mkdir -p "${FLATE_TOOL_DIR}"
+          if [[ "${OS}" == "windows" ]]; then
+            unzip -q "${DL_DIR}/${ARCHIVE}" "${EXEC}" -d "${FLATE_TOOL_DIR}"
+          else
+            tar xzf "${DL_DIR}/${ARCHIVE}" -C "${FLATE_TOOL_DIR}" "${EXEC}"
+          fi
+          chmod +x "${FLATE_TOOL_DIR}/${EXEC}"
+        fi
+
+        echo "${FLATE_TOOL_DIR}" >> "${GITHUB_PATH}"
 
     - id: verify
       name: Verify flate
