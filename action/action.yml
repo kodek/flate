@@ -32,9 +32,6 @@ outputs:
   version:
     description: Resolved flate version (without the leading "v")
     value: ${{ steps.verify.outputs.version }}
-  cache-dir:
-    description: On-disk path flate uses for its persistent cache on this runner
-    value: ${{ steps.resolve.outputs.cache-dir }}
   cache-hit:
     description: Whether a previous flate cache was restored (only meaningful when cache=true)
     value: ${{ steps.cache.outputs.cache-hit }}
@@ -50,7 +47,8 @@ runs:
         INPUT_TOKEN: ${{ inputs.token }}
         ACTION_REF: ${{ github.action_ref }}
         ACTION_REPO: ${{ github.action_repository }}
-      run: |
+        CACHE_DIR: ${{ runner.temp }}
+      run: | # zizmor: ignore[github-env] FLATE_CACHE_DIR is the action's contract; the value is a runner-provided path joined with a literal
         set -euo pipefail
 
         # SemVer pattern — used both to recognize tag-style refs and to filter
@@ -111,24 +109,19 @@ runs:
         version="${version#v}"
         echo "resolved flate version: ${version} (from ${from})"
 
-        # Cache dir: mirrors Go's os.UserCacheDir() — the path flate's cacheroot.Default() resolves to.
-        case "${RUNNER_OS}" in
-          Linux)   dir="${XDG_CACHE_HOME:-${HOME}/.cache}/flate" ;;
-          macOS)   dir="${HOME}/Library/Caches/flate" ;;
-          Windows) dir="${LOCALAPPDATA}/flate" ;;
-        esac
-
-        {
-          echo "version=${version}"
-          echo "cache-dir=${dir}"
-        } >> "${GITHUB_OUTPUT}"
+        # flate >=0.1.30 reads FLATE_CACHE_DIR (autobound from --cache-dir),
+        # so we pick one writable path instead of mirroring Go's
+        # os.UserCacheDir() per OS. Exporting it via GITHUB_ENV ensures
+        # every subsequent `flate` invocation in the job uses it.
+        echo "version=${version}" >> "${GITHUB_OUTPUT}"
+        echo "FLATE_CACHE_DIR=${CACHE_DIR}/flate-cache" >> "${GITHUB_ENV}"
 
     - id: cache
       if: ${{ inputs.cache == 'true' }}
       name: Restore flate cache
       uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       with:
-        path: ${{ steps.resolve.outputs.cache-dir }}
+        path: ${{ env.FLATE_CACHE_DIR }}
         key: flate-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
           flate-${{ runner.os }}-${{ runner.arch }}-

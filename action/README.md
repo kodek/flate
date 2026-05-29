@@ -4,30 +4,30 @@ Install the [flate](https://github.com/home-operations/flate) CLI on Linux, macO
 
 ```yaml
 steps:
-  # Installs flate 0.1.26 (matches the pinned action ref) and reuses its
-  # XDG cache across runs.
-  - uses: home-operations/flate/action@0.1.26
+  # Installs flate matching the pinned action ref and reuses its
+  # on-disk cache across runs.
+  - uses: home-operations/flate/action@0.1.30
     with:
       cache: true
   - run: flate get ks --path ./kubernetes
 ```
 
-Installation is handled by [`jdx/mise-action`](https://github.com/jdx/mise-action) under the hood via mise's `github:` backend, so the same install path works on every runner without bespoke download/checksum scripting.
+The action downloads the release archive from GitHub, verifies its SHA-256, installs into `$RUNNER_TOOL_CACHE` (or the path given via `bindir`), and exports `FLATE_CACHE_DIR` so subsequent `flate` calls write to a predictable location.
 
 ## Inputs
 
-| Name      | Description                                                                         | Default                |
-| --------- | ----------------------------------------------------------------------------------- | ---------------------- |
-| `version` | flate version to install (e.g. `0.1.25`) or `latest`                                | _see [Version](#version)_ |
-| `token`   | GitHub token mise uses to resolve and download releases (avoids unauth rate limits) | `${{ github.token }}`  |
-| `cache`   | Restore and save flate's XDG cache between runs                                     | `false`                |
+| Name      | Description                                                                                 | Default                   |
+| --------- | ------------------------------------------------------------------------------------------- | ------------------------- |
+| `version` | flate version to install (e.g. `0.1.25`) or `latest`                                        | _see [Version](#version)_ |
+| `token`   | GitHub token used to resolve releases and avoid unauthenticated rate limits on GitHub's API | `${{ github.token }}`     |
+| `cache`   | Restore and save flate's on-disk cache between runs                                         | `false`                   |
+| `bindir`  | Alternative install location for the flate binary                                           | `$RUNNER_TOOL_CACHE/...`  |
 
 ## Outputs
 
 | Name        | Description                                                                    |
 | ----------- | ------------------------------------------------------------------------------ |
 | `version`   | Resolved flate version (without the leading `v`)                               |
-| `cache-dir` | On-disk path flate uses for its persistent cache on this runner                |
 | `cache-hit` | `'true'` when a previous flate cache was restored (only set when `cache=true`) |
 
 ## Version
@@ -51,8 +51,10 @@ The SHA-to-tag lookup uses `inputs.token` (defaulted to `${{ github.token }}`) a
 
 ## Caching
 
-Setting `cache: true` wraps the install in [`actions/cache`](https://github.com/actions/cache), pointed at flate's [XDG cache](https://github.com/home-operations/flate/blob/main/pkg/source/cacheroot/layout.go) (`$XDG_CACHE_HOME/flate` on Linux, `~/Library/Caches/flate` on macOS, `%LOCALAPPDATA%\flate` on Windows). This persists fetched git sources, Helm chart tarballs, OCI blobs, and bare git mirrors across runs.
+The action always exports `FLATE_CACHE_DIR=${RUNNER_TEMP}/flate-cache` (auto-bound to flate's `--cache-dir`), so every `flate` invocation in the job writes to that path regardless of OS.
+
+Setting `cache: true` wraps the install in [`actions/cache`](https://github.com/actions/cache), pointed at the same path. This persists fetched git sources, Helm chart tarballs, OCI blobs, and bare git mirrors across runs.
 
 The cache key is keyed on OS, architecture, and the current run — every run saves a fresh entry and restores the most recent one for that runner shape. flate's cache is content-addressed, so cross-run reuse is safe regardless of which flate version produced it.
 
-For finer-grained control, leave `cache: false` and wire your own `actions/cache` step around the action using the `cache-dir` output.
+For finer-grained control, leave `cache: false` and wire your own `actions/cache` step around the action using `${{ env.FLATE_CACHE_DIR }}` as the path.
