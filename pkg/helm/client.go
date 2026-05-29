@@ -18,6 +18,7 @@ import (
 	"github.com/home-operations/flate/pkg/source/blob"
 	"github.com/home-operations/flate/pkg/source/cacheroot"
 	"github.com/home-operations/flate/pkg/store"
+	"github.com/home-operations/flate/pkg/values"
 )
 
 // SecretGetter is the same shape as source.SecretGetter; aliased so
@@ -84,6 +85,23 @@ type Client struct {
 	chartCache     map[string]chartCacheEntry
 	chartLoadLocks *keylock.KeyMap[string]
 
+	// chartValuesCache memoizes mergeChartValuesFiles output keyed by
+	// (chart name + version + joined valuesFiles list). Multiple HRs
+	// sharing a base chart and the same spec.chart.spec.valuesFiles
+	// stack (common: bjw-s app-template with a fixed set of layered
+	// values-*.yaml files) re-yaml.Unmarshal'd the same bytes once per
+	// HR. The cache holds the canonical merged map; callers receive
+	// a deep clone (defensive-copy convention matching indexCache)
+	// because downstream DeepMerge layering mutates the result.
+	//
+	// Guarded by chartMu — same lock as chartCache. The two caches
+	// share a lifecycle (both live for the duration of the Client)
+	// and a relatively low write rate (one entry per unique
+	// chart+valuesFiles tuple per orchestrator run); a separate
+	// mutex would just add coordination overhead with no contention
+	// reduction.
+	chartValuesCache map[string]map[string]any
+
 	// indexCache holds parsed HelmRepository index.yaml documents for
 	// the lifetime of this Client. The same Client serves every
 	// HelmRelease in one orchestrator run, so N HRs pointing at the
@@ -104,31 +122,128 @@ type Client struct {
 	// treated as mutable and downloaded on each run.
 	chartBlobs *blob.Store
 
+	// valuesCache memoizes parsed-YAML output of ExpandValueReferences
+	// across HRs in this Client's lifetime. One HR with 10 valuesFrom
+	// refs hits each entry once; M HRs sharing a platform-wide values
+	// CM re-yaml.Unmarshal'd the same bytes M times without this.
+	// Lives for the Client lifetime — re-creating per Template call
+	// would defeat the cross-HR sharing that delivers the win.
+	valuesCache *values.Cache
+
 	// chartDownloadLocks serializes concurrent downloads of the same
 	// chart tarball so two reconcilers don't race writing the same
 	// cache file. Keyed by content-address digest (when available) or
 	// a name+version+URL token — matches the pattern of chartLoadLocks
 	// and indexLocks above.
 	chartDownloadLocks *keylock.KeyMap[string]
+
+	// templateCache memoizes Template's rendered manifest output keyed
+	// by computeTemplateKey (chart fingerprint + resolved values +
+	// render options + HR action.Install fields). action.Install.RunWithContext
+	// is the single largest CPU + allocation consumer in the codebase
+	// (template.go cites ~300 MB on a 200-HR run); repeat HRs with the
+	// same effective inputs hit this cache and skip the call entirely.
+	//
+	// nil when disabled (NewClientWithOptions called with
+	// TemplateCacheBytes<=0). Both Get and Put handle nil receivers
+	// cleanly so the render path doesn't need extra wiring guards.
+	templateCache *templateCache
 }
 
 // chartCacheEntry pairs the parsed chart with the (mtime, size) of
 // the on-disk tgz at load time. A mismatch on a subsequent lookup
 // means the file was overwritten (mutable tag re-push, manual
 // edit) and the cache entry is stale.
+//
+// fingerprint, when non-empty, is the content-addressed digest of
+// the chart's loader.Load inputs — computed once at cache-fill
+// time and reused on every subsequent LoadChart hit. The template-
+// output cache mixes it into its own key so a stale chart never
+// serves a different chart's render.
 type chartCacheEntry struct {
-	chart *chart.Chart
-	mtime int64 // unix nanos
-	size  int64
+	chart       *chart.Chart
+	mtime       int64 // unix nanos
+	size        int64
+	fingerprint string
 }
 
-// NewClient constructs a Client backed by the supplied Layout. The
-// helm-tmp/ and helm-cache/ directories are taken from the Layout —
-// helm.Client never composes its own paths. The chart-tarball CAS is
-// rooted at the SHARED <root>/blobs/sha256/ blob store so identical
-// chart bytes deduplicate across HelmRepositories and across
-// orchestrator embedders.
+// ClientOptions tunes NewClientWithOptions construction. Callers
+// that want historical defaults pass DefaultClientOptions();
+// embedders that want to disable specific caches (memory-constrained
+// CI, embedders that prefer their own caching layer) build the
+// struct field-by-field.
+type ClientOptions struct {
+	// TemplateCacheBytes caps the in-memory helm-template-output
+	// cache. <= 0 disables the cache. Use DefaultTemplateCacheBytes
+	// for the project-wide default.
+	TemplateCacheBytes int64
+
+	// RenderCacheBytes caps the persistent on-disk helm template-
+	// output cache (Phase 3.4a). <= 0 disables disk caching. Disk
+	// caching is also disabled when RenderCacheRoot is empty even
+	// if RenderCacheBytes > 0 — the wiring requires both.
+	RenderCacheBytes int64
+
+	// RenderCacheRoot is the on-disk directory the persistent
+	// template-output cache writes into (typically
+	// layout.RenderHelmCache()). Empty disables disk caching even
+	// when RenderCacheBytes > 0.
+	RenderCacheRoot string
+}
+
+// DefaultTemplateCacheBytes is the historical default size of the
+// helm template-output cache: 256 MiB. The CLI surfaces this
+// through the --helm-template-cache-mb flag (256 by default; 0
+// disables).
+const DefaultTemplateCacheBytes int64 = 256 << 20
+
+// DefaultRenderCacheBytes is the default size of the persistent
+// helm template-output cache: 1 GiB. The CLI surfaces this through
+// the --helm-render-cache-mb flag (1024 by default; 0 disables).
+const DefaultRenderCacheBytes int64 = 1024 << 20
+
+// DefaultClientOptions returns the ClientOptions a vanilla NewClient
+// call uses — historical project defaults baked in. Disk caching is
+// off by default at the constructor level: a vanilla NewClient
+// caller hasn't provided a cache root, so we can't safely choose
+// one for them. Callers wanting disk caching populate
+// RenderCacheRoot explicitly (typically from layout.RenderHelmCache()).
+func DefaultClientOptions() ClientOptions {
+	return ClientOptions{
+		TemplateCacheBytes: DefaultTemplateCacheBytes,
+	}
+}
+
+// NewClient constructs a Client backed by the supplied Layout with
+// project-wide defaults (DefaultClientOptions). The helm-tmp/ and
+// helm-cache/ directories are taken from the Layout — helm.Client
+// never composes its own paths. The chart-tarball CAS is rooted at
+// the SHARED <root>/blobs/sha256/ blob store so identical chart
+// bytes deduplicate across HelmRepositories and across orchestrator
+// embedders.
+//
+// Disk-backed template-output cache defaults to enabled at
+// DefaultRenderCacheBytes, rooted at layout.RenderHelmCache(). When
+// layout.Root is empty (an embedder explicitly opted out of any
+// persistent cache) the disk layer auto-disables so we don't write
+// into the OS tempdir under a synthesised "flate-cache" subdir.
+//
+// Embedders that need to tune cache sizing (TemplateCacheBytes, …)
+// should call NewClientWithOptions instead.
 func NewClient(layout cacheroot.Layout) (*Client, error) {
+	opts := DefaultClientOptions()
+	if layout.Root != "" {
+		opts.RenderCacheBytes = DefaultRenderCacheBytes
+		opts.RenderCacheRoot = layout.RenderHelmCache()
+	}
+	return NewClientWithOptions(layout, opts)
+}
+
+// NewClientWithOptions is NewClient with explicit ClientOptions.
+// Pass DefaultClientOptions() to get historical defaults; build the
+// struct manually to disable individual caches (e.g.
+// TemplateCacheBytes=0 for the template-output cache).
+func NewClientWithOptions(layout cacheroot.Layout, opts ClientOptions) (*Client, error) {
 	if layout.Root == "" {
 		// Embedders that don't wire a cache root still need a working
 		// client. Anchor under the OS tempdir so the legacy default
@@ -152,12 +267,24 @@ func NewClient(layout cacheroot.Layout) (*Client, error) {
 		cacheDir:           cacheDir,
 		registry:           reg,
 		chartCache:         map[string]chartCacheEntry{},
+		chartValuesCache:   map[string]map[string]any{},
 		chartLoadLocks:     keylock.New[string](),
 		indexLocks:         keylock.New[string](),
 		chartDownloadLocks: keylock.New[string](),
 		chartBlobs:         blob.NewStore(layout),
+		valuesCache:        values.NewCache(),
+		templateCache: newTemplateCache(
+			opts.TemplateCacheBytes,
+			newDiskRenderCache(opts.RenderCacheRoot, opts.RenderCacheBytes),
+		),
 	}, nil
 }
+
+// ValuesCache returns the Client's per-orchestrator valuesFrom parse
+// cache so callers (helm.Prepare, the HR controller) can pass it
+// through to values.ExpandValueReferences. Always non-nil for
+// Clients constructed via NewClient.
+func (c *Client) ValuesCache() *values.Cache { return c.valuesCache }
 
 // SetSecretGetter installs a Secret lookup function so HelmRepository
 // SecretRef credentials can be resolved at pull time. Safe to call
@@ -309,8 +436,8 @@ func (c *Client) LoadChart(ctx context.Context, hr *manifest.HelmRelease) (Chart
 	// same name-version land via writeAtomic at the same path, so the
 	// path is a stable string but the underlying bytes may have
 	// changed; without the stat check we'd serve the stale chart.
-	if ch, ok := c.lookupCachedChart(path); ok {
-		return ChartLoadResult{Path: path, Chart: cloneChartForRender(ch)}, nil
+	if ch, fp, ok := c.lookupCachedChart(path); ok {
+		return ChartLoadResult{Path: path, Chart: cloneChartForRender(ch), Fingerprint: fp}, nil
 	}
 
 	// Coalesce parallel first-loads of the same chart so N concurrent
@@ -325,8 +452,8 @@ func (c *Client) LoadChart(ctx context.Context, hr *manifest.HelmRelease) (Chart
 
 	// Re-check under the per-path lock — another goroutine may have
 	// populated the cache while we waited.
-	if ch, ok := c.lookupCachedChart(path); ok {
-		return ChartLoadResult{Path: path, Chart: cloneChartForRender(ch)}, nil
+	if ch, fp, ok := c.lookupCachedChart(path); ok {
+		return ChartLoadResult{Path: path, Chart: cloneChartForRender(ch), Fingerprint: fp}, nil
 	}
 
 	ch, err := loader.Load(path)
@@ -340,16 +467,30 @@ func (c *Client) LoadChart(ctx context.Context, hr *manifest.HelmRelease) (Chart
 		_ = os.Remove(path)
 		return ChartLoadResult{}, fmt.Errorf("load chart %s: %w", path, err)
 	}
+	// Compute the chart fingerprint once per cache-fill so every
+	// subsequent Template call against this path participates in the
+	// template-output cache without re-walking the chart. Skipped
+	// when the template cache is disabled to avoid the (cheap but
+	// nonzero) digest cost for embedders that opted out.
+	var fingerprint string
+	if c.templateCache != nil {
+		fingerprint = chartFingerprint(ch)
+	}
 	if mtime, size, ok := chartCacheFingerprint(path); ok {
 		c.chartMu.Lock()
-		c.chartCache[path] = chartCacheEntry{chart: ch, mtime: mtime, size: size}
+		c.chartCache[path] = chartCacheEntry{
+			chart:       ch,
+			mtime:       mtime,
+			size:        size,
+			fingerprint: fingerprint,
+		}
 		c.chartMu.Unlock()
 	}
 	// Hand the caller a clone — helm's Install.RunWithContext invokes
 	// chartutil.ProcessDependencies which mutates Chart.Values and the
 	// per-Dependency Enabled flags. Sharing the cached pointer races
 	// across concurrent renders.
-	return ChartLoadResult{Path: path, Chart: cloneChartForRender(ch)}, nil
+	return ChartLoadResult{Path: path, Chart: cloneChartForRender(ch), Fingerprint: fingerprint}, nil
 }
 
 // cloneChartForRender returns a shallow copy of src with the fields
@@ -402,21 +543,26 @@ func cloneChartForRender(src *chart.Chart) *chart.Chart {
 // A mismatch (mutable OCI tag re-pushed, manual edit) returns false
 // so the caller re-parses. A missing or unstattable path also
 // returns false — the caller will surface that via loader.Load.
-func (c *Client) lookupCachedChart(path string) (*chart.Chart, bool) {
+//
+// The second return is the chart's content-addressed fingerprint
+// (computed once at cache fill); the template-output cache mixes
+// it into its own key so a stale chart never serves a different
+// chart's render. Empty when the template cache is disabled.
+func (c *Client) lookupCachedChart(path string) (*chart.Chart, string, bool) {
 	c.chartMu.RLock()
 	entry, ok := c.chartCache[path]
 	c.chartMu.RUnlock()
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	mtime, size, ok := chartCacheFingerprint(path)
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	if mtime != entry.mtime || size != entry.size {
-		return nil, false
+		return nil, "", false
 	}
-	return entry.chart, true
+	return entry.chart, entry.fingerprint, true
 }
 
 // chartCacheFingerprint returns the (mtime, size) tuple flate uses

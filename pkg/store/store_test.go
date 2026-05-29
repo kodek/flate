@@ -572,6 +572,84 @@ func TestStore_SetArtifact(t *testing.T) {
 	}
 }
 
+// TestStore_SetArtifact_DistinctPointerDedup pins Item 7's primary
+// dedup contract: a re-set with a DISTINCT POINTER but
+// content-equal artifact is a no-op. The KS / HR re-emit case —
+// rendered docs decode into fresh maps every reconcile — drives
+// this in production.
+func TestStore_SetArtifact_DistinctPointerDedup(t *testing.T) {
+	s := New()
+	id := manifest.NamedResource{Kind: manifest.KindKustomization, Namespace: "flux-system", Name: "apps"}
+	makeArt := func() *KustomizationArtifact {
+		return &KustomizationArtifact{
+			Path: "./apps",
+			Manifests: []map[string]any{
+				{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata":   map[string]any{"name": "cm-1", "namespace": "default"},
+					"data":       map[string]any{"k": "v"},
+				},
+			},
+		}
+	}
+
+	events := 0
+	s.AddListener(EventArtifactUpdated, func(_ manifest.NamedResource, _ any) { events++ }, false)
+
+	s.SetArtifact(id, makeArt())
+	s.SetArtifact(id, makeArt()) // fresh pointer, identical content
+	s.SetArtifact(id, makeArt()) // fresh pointer, identical content
+
+	if events != 1 {
+		t.Errorf("expected 1 event despite 3 sets with identical content, got %d", events)
+	}
+}
+
+// TestStore_SetArtifact_PointerIdentityShortCircuit pins Item 7's
+// pointer-identity fast path: re-setting the SAME pointer skips
+// reflection entirely. Source-controller refresh loops cache their
+// own SourceArtifact and re-publish it on every tick; the
+// short-circuit cuts that hot path from ~58 ns (reflect.DeepEqual on
+// aliased pointers) to ~17 ns (the map lookup alone).
+func TestStore_SetArtifact_PointerIdentityShortCircuit(t *testing.T) {
+	s := New()
+	id := manifest.NamedResource{Kind: manifest.KindGitRepository, Name: "r"}
+	art := &SourceArtifact{Kind: "GitRepository", URL: "https://example", LocalPath: "/tmp/x"}
+
+	events := 0
+	s.AddListener(EventArtifactUpdated, func(_ manifest.NamedResource, _ any) { events++ }, false)
+
+	s.SetArtifact(id, art)
+	s.SetArtifact(id, art) // same pointer
+	s.SetArtifact(id, art) // same pointer
+
+	if events != 1 {
+		t.Errorf("expected 1 event for same-pointer re-set, got %d", events)
+	}
+}
+
+// TestStore_SetArtifact_DifferentContent pins the inverse: a
+// re-set with DIFFERENT content fires an event.
+func TestStore_SetArtifact_DifferentContent(t *testing.T) {
+	s := New()
+	id := manifest.NamedResource{Kind: manifest.KindKustomization, Namespace: "flux-system", Name: "apps"}
+
+	events := 0
+	s.AddListener(EventArtifactUpdated, func(_ manifest.NamedResource, _ any) { events++ }, false)
+
+	s.SetArtifact(id, &KustomizationArtifact{Path: "./apps", Manifests: []map[string]any{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "cm-1"}},
+	}})
+	s.SetArtifact(id, &KustomizationArtifact{Path: "./apps", Manifests: []map[string]any{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "cm-2"}},
+	}})
+
+	if events != 2 {
+		t.Errorf("expected 2 events for distinct content, got %d", events)
+	}
+}
+
 func TestStore_ListenerPanicIsolated(t *testing.T) {
 	s := New()
 	other := 0
@@ -751,17 +829,19 @@ func TestStore_AddRendered_DispatchesListeners(t *testing.T) {
 // TestStore_AddListenerNoFlush_NoMissedConcurrentWrites pins that a
 // listener registered with flush=false against a hot writer doesn't
 // miss the next live event. Pre-fix, the non-flush branch took
-// set.mu but not s.mu, so a writer could:
-//  1. Lock s.mu, mutate store.
-//  2. Capture set.snapshot() under set.mu (independent of s.mu).
-//  3. Release s.mu.
+// set.mu but not the store lock, so a writer could:
+//  1. Lock its shard, mutate.
+//  2. Capture set.snapshot() under set.mu (independent of the shard).
+//  3. Release the shard.
 //  4. Dispatch to the pre-add snapshot.
 //
 // while the registrar slid set.add(fn) between steps 2 and 4. fn
-// silently misses the live event. Holding s.mu around set.add
-// closes the window. Test races N writers against AddListener and
-// asserts the listener observes every AddObject made after its own
-// goroutine acquired the lock.
+// silently misses the live event. Holding every shard's RLock
+// around set.add closes the window (writers fire under their own
+// shard's write lock, exclusive with the registrar's RLock). Test
+// races N writers against AddListener and asserts the listener
+// observes every AddObject made after its own goroutine acquired
+// the lock.
 func TestStore_AddListenerNoFlush_NoMissedConcurrentWrites(t *testing.T) {
 	s := New()
 	const writers = 64
@@ -798,5 +878,227 @@ func TestStore_AddListenerNoFlush_NoMissedConcurrentWrites(t *testing.T) {
 	writerWG.Wait()
 	if got := seen.Load(); got != 1 {
 		t.Errorf("listener missed the post-registration definite-post event (saw %d, want 1) — non-flush race regression", got)
+	}
+}
+
+// TestStore_ListenerSnapshotPool_NoLostEvents stresses the pooled
+// listener-snapshot path under concurrent fires. With 10 goroutines
+// firing 100 events each against a 50-listener set, every listener
+// must observe every event — losing one means the pool aliasing
+// is wrong (the dispatcher iterated a slice that had already been
+// released and recycled by another fire). Run under -race for the
+// full guarantee.
+func TestStore_ListenerSnapshotPool_NoLostEvents(t *testing.T) {
+	s := New()
+	const (
+		numListeners = 50
+		numFirers    = 10
+		eventsPer    = 100
+	)
+	totalEvents := int64(numFirers * eventsPer)
+	wantPerListener := totalEvents
+
+	counts := make([]atomic.Int64, numListeners)
+	for i := range numListeners {
+		i := i
+		s.AddListener(EventObjectAdded, func(_ manifest.NamedResource, _ any) {
+			counts[i].Add(1)
+		}, false)
+	}
+
+	var wg sync.WaitGroup
+	for g := range numFirers {
+		wg.Go(func() {
+			for n := range eventsPer {
+				// Distinct names per (goroutine, event) so the
+				// AddObject dedup never short-circuits — each call
+				// must fire EventObjectAdded.
+				name := fmt.Sprintf("g%d-n%d", g, n)
+				s.AddObject(newCM(name, "ns"))
+			}
+		})
+	}
+	wg.Wait()
+
+	for i := range numListeners {
+		if got := counts[i].Load(); got != wantPerListener {
+			t.Errorf("listener[%d] observed %d events, want %d (pool aliasing dropped a fire?)", i, got, wantPerListener)
+		}
+	}
+}
+
+// TestStore_SetConditionLocked_StableSliceLength asserts the in-place
+// rebuild contract for setConditionLocked: mutating the same condition
+// type N times leaves the conditions slice at length 1, not N. The
+// pre-fix implementation rebuilt the slice from scratch on every
+// transition (O(N) allocations across N transitions); the in-place
+// overwrite drops every allocation past the first.
+//
+// Counting GetConditions length is sufficient — the contract is "one
+// entry per unique Type, in-place updates do not grow the slice".
+func TestStore_SetConditionLocked_StableSliceLength(t *testing.T) {
+	s := New()
+	id := newCM("a", "ns").Named()
+
+	for i := range 100 {
+		// Alternate status/message so every call is non-equal — the
+		// no-op short-circuit must NOT kick in, forcing each call
+		// through the overwrite branch.
+		status := StatusPending
+		if i%2 == 0 {
+			status = StatusReady
+		}
+		s.UpdateStatus(id, status, fmt.Sprintf("iter-%d", i))
+	}
+
+	conds := s.GetConditions(id)
+	if got := len(conds); got != 1 {
+		t.Errorf("conditions slice length = %d after 100 same-type mutations, want 1", got)
+	}
+}
+
+// TestStore_SetConditionLocked_AppendsDistinctTypes pins the
+// fall-through-to-append path for new condition types: a Healthy
+// transition on top of an existing Ready must produce a 2-entry
+// slice, with both entries preserved across subsequent same-type
+// updates. The in-place mutation rule applies per-Type, not globally.
+func TestStore_SetConditionLocked_AppendsDistinctTypes(t *testing.T) {
+	s := New()
+	id := newCM("a", "ns").Named()
+
+	s.UpdateStatus(id, StatusReady, "ok")
+	s.SetCondition(id, metav1.Condition{
+		Type:    ConditionHealthy,
+		Status:  metav1.ConditionTrue,
+		Reason:  "Healthy",
+		Message: "healthy",
+	})
+
+	conds := s.GetConditions(id)
+	if got := len(conds); got != 2 {
+		t.Fatalf("conditions length = %d, want 2 (Ready + Healthy)", got)
+	}
+
+	// Mutating one in place must leave the other alone and keep length stable.
+	s.UpdateStatus(id, StatusFailed, "boom")
+	conds = s.GetConditions(id)
+	if got := len(conds); got != 2 {
+		t.Errorf("conditions length = %d after Ready transition, want 2", got)
+	}
+	var sawReady, sawHealthy bool
+	for _, c := range conds {
+		switch c.Type {
+		case ConditionReady:
+			sawReady = true
+		case ConditionHealthy:
+			sawHealthy = true
+		}
+	}
+	if !sawReady || !sawHealthy {
+		t.Errorf("expected both Ready and Healthy; sawReady=%v sawHealthy=%v", sawReady, sawHealthy)
+	}
+}
+
+// TestStore_ShardedConcurrentDifferentKinds hammers two distinct Kinds
+// (Kustomization, HelmRelease) from many goroutines concurrently and
+// asserts the operations complete cleanly under -race. The KS and HR
+// Kinds hash to different shards (verified manually: KS→14, HR→10), so
+// the workload exercises the cross-Kind parallelism that justifies the
+// shard refactor — under the old single-mutex design these goroutines
+// would all serialize on the single global lock. The bug bar here is correctness, not
+// timing: -race surfaces any shard-locking mistake (cross-shard
+// dangling reads, missed unlock paths, deadlocks) as a data race or
+// hang within the 30s test budget.
+func TestStore_ShardedConcurrentDifferentKinds(t *testing.T) {
+	s := New()
+	const N = 50
+	const workers = 8
+	var wg sync.WaitGroup
+
+	// 4 goroutines on Kustomizations, 4 on HelmReleases.
+	for w := range workers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			isKS := w%2 == 0
+			for i := range N {
+				if isKS {
+					ks := &manifest.Kustomization{Name: fmt.Sprintf("ks-%d-%d", w, i), Namespace: "ns"}
+					s.AddObject(ks)
+					s.UpdateStatus(ks.Named(), StatusReady, "ok")
+					_ = s.GetObject(ks.Named())
+				} else {
+					hr := &manifest.HelmRelease{Name: fmt.Sprintf("hr-%d-%d", w, i), Namespace: "ns"}
+					s.AddObject(hr)
+					s.UpdateStatus(hr.Named(), StatusReady, "ok")
+					_ = s.GetObject(hr.Named())
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// Sanity: every object landed.
+	if got := len(s.ListObjects(manifest.KindKustomization)); got != N*(workers/2) {
+		t.Errorf("expected %d KSes, got %d", N*(workers/2), got)
+	}
+	if got := len(s.ListObjects(manifest.KindHelmRelease)); got != N*(workers/2) {
+		t.Errorf("expected %d HRs, got %d", N*(workers/2), got)
+	}
+}
+
+// TestStore_CrossKindOperationDoesntDeadlock pounds the cross-shard
+// paths (ListObjects(""), FailedResources, AddListener(replay=true))
+// from many goroutines while per-shard writers churn through different
+// Kinds. The canonical-order lockAll/rLockAll rule prevents two
+// cross-shard operations from deadlocking by taking shards in opposing
+// orders. Any regression that locks shards out-of-order — e.g. a
+// future lockAll variant that iterates from N-1 down to 0 — produces
+// a hang within the 30s test timeout.
+func TestStore_CrossKindOperationDoesntDeadlock(t *testing.T) {
+	s := New()
+	const goroutines = 32
+	const ops = 30
+
+	// Seed with a mix of kinds across multiple shards.
+	for i := range 10 {
+		s.AddObject(&manifest.Kustomization{Name: fmt.Sprintf("ks-%d", i), Namespace: "ns"})
+		s.AddObject(&manifest.HelmRelease{Name: fmt.Sprintf("hr-%d", i), Namespace: "ns"})
+		s.AddObject(newCM(fmt.Sprintf("cm-%d", i), "ns"))
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := range goroutines {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := range ops {
+				switch (w + i) % 5 {
+				case 0:
+					_ = s.ListObjects("")
+				case 1:
+					_ = s.FailedResources()
+				case 2:
+					unsub := s.AddListener(EventObjectAdded, func(manifest.NamedResource, any) {}, true)
+					unsub()
+				case 3:
+					ks := &manifest.Kustomization{Name: fmt.Sprintf("ks-w%d-i%d", w, i), Namespace: "ns"}
+					s.AddObject(ks)
+					s.UpdateStatus(ks.Named(), StatusFailed, "boom")
+				case 4:
+					hr := &manifest.HelmRelease{Name: fmt.Sprintf("hr-w%d-i%d", w, i), Namespace: "ns"}
+					s.AddObject(hr)
+					s.SetArtifact(hr.Named(), &HelmReleaseArtifact{Manifests: nil, Fingerprint: "x"})
+				}
+			}
+		}(w)
+	}
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		// Success — no deadlock.
+	case <-time.After(30 * time.Second):
+		t.Fatal("cross-shard ops deadlocked (lockAll canonical-order regression?)")
 	}
 }

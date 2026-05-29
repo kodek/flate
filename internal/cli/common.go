@@ -36,9 +36,33 @@ type commonFlags struct {
 	enableOCI           bool
 	registryConfig      string
 	concurrency         int
+	// stageCacheMB caps the persistent kustomize stage cache. 0
+	// disables LRU eviction so the GC subcommand owns cleanup.
+	stageCacheMB int
 	// cacheDir is resolved lazily via resolveCacheRoot and memoized so
 	// multiple lookups within one invocation return the same value.
 	cacheDir string
+	// profileMode selects a runtime profile to capture for the run.
+	// Empty disables profiling; valid values are "cpu", "mem", "block",
+	// "mutex", and "trace". Wired through startProfile in profile.go.
+	profileMode string
+	// profileOut is the directory profile files land in. Defaults to
+	// the current working directory when --profile is set and no
+	// --profile-out is given.
+	profileOut string
+	// helmTemplateCacheMB caps the in-memory helm template-output
+	// cache in megabytes. Default 256; 0 disables. Plumbed through
+	// orchestrator.Config.HelmTemplateCacheBytes into the helm.Client
+	// constructor.
+	helmTemplateCacheMB int
+	// helmRenderCacheMB caps the persistent on-disk helm template-
+	// output cache in megabytes (Phase 3.4a). Default 1024; 0
+	// disables. Plumbed through orchestrator.Config.HelmRenderCacheBytes
+	// into the helm.Client constructor. Cross-process: repeat `flate
+	// build` / `flate diff` runs against the same checkout reuse
+	// previously-rendered manifests instead of re-running
+	// action.Install.RunWithContext.
+	helmRenderCacheMB int
 }
 
 func bindCommon(fs *pflag.FlagSet, f *commonFlags) {
@@ -60,6 +84,25 @@ func bindCommon(fs *pflag.FlagSet, f *commonFlags) {
 	fs.StringVar(&f.registryConfig, "registry-config", "", "docker config.json for OCI authentication")
 	fs.IntVar(&f.concurrency, "concurrency", runtime.NumCPU()*4,
 		"max parallel reconcile bodies (0 = unbounded)")
+	fs.StringVar(&f.profileMode, "profile", "",
+		"write a runtime profile: cpu, mem, block, mutex, or trace (off by default)")
+	fs.StringVar(&f.profileOut, "profile-out", ".",
+		"directory to write profile files into (used with --profile)")
+	// 256 MiB default mirrors helm.DefaultTemplateCacheBytes. 0 disables
+	// the cache entirely (useful in memory-constrained CI or when
+	// debugging the uncached helm render path).
+	fs.IntVar(&f.helmTemplateCacheMB, "helm-template-cache-mb", 256,
+		"size of the in-memory helm template-output cache in megabytes (0 disables)")
+	// 1 GiB default mirrors helm.DefaultRenderCacheBytes. Cross-process:
+	// repeat `flate build`/`flate diff` runs against the same checkout
+	// hit the persistent cache and short-circuit the helm render. 0
+	// disables (useful when debugging the uncached path or in shared
+	// CI runners where disk cost outweighs the rerun savings).
+	fs.IntVar(&f.helmRenderCacheMB, "helm-render-cache-mb", 1024,
+		"size of the persistent on-disk helm template-output cache in megabytes (0 disables)")
+	fs.IntVar(&f.stageCacheMB, "stage-cache-mb", 2048,
+		"cap (MiB) for the persistent kustomize stage cache; 0 disables LRU eviction "+
+			"(the cache subcommand still age-prunes)")
 }
 
 // skipResourceKinds delegates to helm.Options.SkipResourceKinds so
@@ -252,15 +295,18 @@ func resolveBaseline(_ context.Context, c *commonFlags, autoFallback bool) (func
 
 func buildOrchCfg(c commonFlags, h helmFlags) orchestrator.Config {
 	return orchestrator.Config{
-		Path:                c.path,
-		PathOrig:            c.pathOrig,
-		HelmOptions:         c.helmOptions(h),
-		WipeSecrets:         true,
-		EnableOCI:           c.enableOCI,
-		RegistryConfig:      c.registryConfig,
-		Concurrency:         c.concurrency,
-		AllowMissingSecrets: c.allowMissingSecrets,
-		CacheDir:            c.resolveCacheRoot(),
+		Path:                   c.path,
+		PathOrig:               c.pathOrig,
+		HelmOptions:            c.helmOptions(h),
+		WipeSecrets:            true,
+		EnableOCI:              c.enableOCI,
+		RegistryConfig:         c.registryConfig,
+		Concurrency:            c.concurrency,
+		AllowMissingSecrets:    c.allowMissingSecrets,
+		CacheDir:               c.resolveCacheRoot(),
+		HelmTemplateCacheBytes: int64(c.helmTemplateCacheMB) << 20,
+		HelmRenderCacheBytes:   int64(c.helmRenderCacheMB) << 20,
+		StageCacheBytes:        int64(c.stageCacheMB) << 20,
 	}
 }
 

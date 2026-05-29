@@ -9,7 +9,10 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/home-operations/flate/pkg/change"
 	"github.com/home-operations/flate/pkg/controllers/helmrelease"
@@ -33,6 +36,12 @@ import (
 
 // Config carries everything the orchestrator needs.
 type Config struct {
+	// StageCacheBytes caps the persistent kustomize stage cache. 0
+	// disables eviction (unbounded growth — the GC subcommand still
+	// handles age-based cleanup). The flag's expected unit is mebibytes
+	// at the CLI layer; this field is bytes.
+	StageCacheBytes int64
+
 	// Path is the directory to scan for Flux objects.
 	Path string
 	// PathOrig, when non-empty, switches every command into
@@ -82,6 +91,26 @@ type Config struct {
 	// unaffected. Sensible default for I/O-bound work is
 	// runtime.NumCPU() * 4.
 	Concurrency int
+
+	// HelmTemplateCacheBytes caps the in-memory helm template-output
+	// cache. Repeat HRs with identical effective inputs (chart
+	// fingerprint, resolved values, render options) hit the cache and
+	// skip action.Install.RunWithContext — the single largest CPU +
+	// allocation consumer in the codebase. <= 0 disables the cache.
+	// The CLI flag `--helm-template-cache-mb` exposes this in MB
+	// units; embedders pass bytes directly.
+	HelmTemplateCacheBytes int64
+
+	// HelmRenderCacheBytes caps the persistent on-disk helm template-
+	// output cache (Phase 3.4a). Cross-process reuse: repeat `flate
+	// build` / `flate diff` invocations against the same checkout
+	// short-circuit the helm render entirely when the chart
+	// fingerprint + resolved values + opts tuple hits the disk layer.
+	// <= 0 disables disk caching; the in-memory layer (sized by
+	// HelmTemplateCacheBytes) continues to operate independently.
+	// The CLI flag `--helm-render-cache-mb` exposes this in MB
+	// units; embedders pass bytes directly.
+	HelmRenderCacheBytes int64
 }
 
 // Orchestrator wires controllers and drives reconciliation.
@@ -95,6 +124,16 @@ type Orchestrator struct {
 	helm    *helm.Client
 	staging *kustomize.StagingCache
 	filter  *change.Filter
+
+	// gitFetcher holds the typed *git.Fetcher constructed in New so
+	// Run can drive Prewarm against every discovered GitRepository in
+	// parallel with controller startup. The source controller already
+	// holds the same fetcher wrapped behind source.Wrap; we keep a
+	// direct reference because Prewarm is a typed call (one URL per
+	// GitRepository) the wrapper doesn't expose. nil when the orchestrator
+	// is built without a git fetcher (tests that strip the default via
+	// WithFetcher(KindGitRepository, nil)) — Run's pre-warm pass skips.
+	gitFetcher *git.Fetcher
 
 	// repoRoot is the resolved .git ancestor of cfg.Path (or
 	// cfg.Path when no .git exists). Populated during Bootstrap from
@@ -132,6 +171,20 @@ type Orchestrator struct {
 	// other file-indexed dep on demand.
 	existence *loader.ExistenceIndex
 
+	// componentCache memoizes manifest.ReadKustomizeComponents reads
+	// across every Bootstrap consumer that walks the KS list: the
+	// loader's FinalizeGenerators (KSPathPrefixes), discovery's
+	// parent-index builds and orphan-promotion pass, the change
+	// filter's buildOwnership, and finalize.detectOrphans. Without
+	// the shared cache each consumer re-reads every kustomization.yaml
+	// once — N consumers × K KSes file opens per Bootstrap; with it,
+	// each (repoRoot, base) pair is read exactly once. Live for the
+	// life of the orchestrator (cleared via GC when the Orchestrator
+	// is collected), instantiated fresh per New() so test harnesses
+	// that reuse an orchestrator across re-Bootstrap cycles still pick
+	// up on-disk edits.
+	componentCache *manifest.ComponentCache
+
 	// orphans records resources Run demoted from Failed → Ready because
 	// they aren't referenced by any parent KS. Populated during Run,
 	// surfaced via Render() so embedders can distinguish orphan-skips
@@ -147,6 +200,13 @@ type Orchestrator struct {
 	// failDependsOnCycles and serializes reads in preflightFailure.
 	preflightMu       sync.RWMutex
 	preflightFailures map[manifest.NamedResource]string
+
+	// depGraph maintains an incremental copy of the same-kind
+	// dependsOn graph so cycle detection on EventObjectAdded touches
+	// only the edges that changed instead of rerunning the full tri-
+	// color DFS over every Kustomization / HelmRelease. Lives for the
+	// life of the orchestrator; populated lazily as objects are added.
+	depGraph *dependencyGraph
 
 	// rsExtensions holds non-Flux docs produced by ResourceSet renders,
 	// keyed by the owning structural-parent Kustomization. Populated
@@ -191,11 +251,22 @@ func New(cfg Config) (*Orchestrator, error) {
 	}
 
 	layout := cacheroot.New(cmp.Or(cfg.CacheDir, cacheroot.Default()))
-	helmClient, err := helm.NewClient(layout)
+	helmClientOpts := helm.ClientOptions{
+		TemplateCacheBytes: cfg.HelmTemplateCacheBytes,
+		RenderCacheBytes:   cfg.HelmRenderCacheBytes,
+	}
+	// Only point the disk layer at a concrete path when the persistent
+	// cache is enabled (HelmRenderCacheBytes > 0). Leaving the root
+	// blank when disabled lets the disk-cache constructor short-circuit
+	// without performing any directory layout pre-checks.
+	if cfg.HelmRenderCacheBytes > 0 {
+		helmClientOpts.RenderCacheRoot = layout.RenderHelmCache()
+	}
+	helmClient, err := helm.NewClientWithOptions(layout, helmClientOpts)
 	if err != nil {
 		return nil, err
 	}
-	staging, err := kustomize.NewStagingCache(layout.Stage())
+	staging, err := kustomize.NewStagingCacheFromLayout(layout, cfg.StageCacheBytes)
 	if err != nil {
 		// helmClient already created tmpDir + cacheDir under the
 		// cache root. Leaving them would leak a temp directory per
@@ -230,12 +301,13 @@ func New(cfg Config) (*Orchestrator, error) {
 	// payload at dispatch surfaces "<kind> fetcher: unexpected
 	// payload <T>" from the single adapter site rather than from
 	// four nearly-identical type assertions.
+	gitFetcher := &git.Fetcher{
+		Cache:   cache,
+		Secrets: secretGet,
+		Mirrors: mirror.New(layout),
+	}
 	srcCtrl.Fetchers[manifest.KindGitRepository] = source.Wrap(
-		manifest.KindGitRepository, &git.Fetcher{
-			Cache:   cache,
-			Secrets: secretGet,
-			Mirrors: mirror.New(layout),
-		})
+		manifest.KindGitRepository, gitFetcher)
 	srcCtrl.Fetchers[manifest.KindExternalArtifact] = source.Wrap(
 		manifest.KindExternalArtifact, &external.Fetcher{})
 	srcCtrl.Fetchers[manifest.KindBucket] = source.Wrap(
@@ -265,15 +337,18 @@ func New(cfg Config) (*Orchestrator, error) {
 		srcCtrl.Fetchers[manifest.KindOCIRepository] = source.ExistenceFetcher{}
 	}
 	o := &Orchestrator{
-		cfg:      cfg,
-		store:    st,
-		tasks:    ts,
-		src:      srcCtrl,
-		ksc:      kustomization.New(st, ts, staging, cfg.WipeSecrets),
-		hrc:      helmrelease.New(st, ts, helmClient, cfg.HelmOptions, cfg.WipeSecrets),
-		rendered: newRenderedSet(),
-		helm:     helmClient,
-		staging:  staging,
+		cfg:            cfg,
+		store:          st,
+		tasks:          ts,
+		src:            srcCtrl,
+		ksc:            kustomization.New(st, ts, staging, cfg.WipeSecrets),
+		hrc:            helmrelease.New(st, ts, helmClient, cfg.HelmOptions, cfg.WipeSecrets),
+		rendered:       newRenderedSet(),
+		helm:           helmClient,
+		staging:        staging,
+		componentCache: manifest.NewComponentCache(),
+		depGraph:       newDependencyGraph(),
+		gitFetcher:     gitFetcher,
 	}
 	return o, nil
 }
@@ -318,6 +393,7 @@ func (o *Orchestrator) Filter() *change.Filter { return o.filter }
 func (o *Orchestrator) Bootstrap(ctx context.Context) error {
 	res, err := discovery.Run(ctx, discovery.Config{
 		Path: o.cfg.Path, Store: o.store, WipeSecrets: o.cfg.WipeSecrets,
+		ComponentCache: o.componentCache,
 	})
 	if err != nil {
 		return err
@@ -494,7 +570,7 @@ func (o *Orchestrator) buildChangeFilter(repoRoot string) error {
 	if changes == nil {
 		return nil
 	}
-	f := change.NewFilter(changes, o.sourceFiles, repoRoot, o.store)
+	f := change.NewFilterWithCache(changes, o.sourceFiles, repoRoot, o.store, o.componentCache)
 	// Wire OnAdd so a runtime keep-set extension (KS controller's
 	// emitRenderedChildren → keepEmitted) refires any source whose
 	// listener already short-circuited via PreGate before the
@@ -628,10 +704,15 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Bootstrap's one-shot pass only sees file-loaded resources; a
 	// parent KS render that emits a child with a dependsOn pointing at
 	// another freshly-emitted (or pre-existing) peer can introduce a
-	// cycle invisible to the Bootstrap pass. failDependsOnCycles
-	// short-circuits when no cycle is present (O(N+E) DFS, then
-	// early-return), so re-running on every KS/HR add is cheap even on
-	// render-heavy passes.
+	// cycle invisible to the Bootstrap pass.
+	//
+	// Hot path: updateDependencyGraphFor touches only the changed id's
+	// edges. The pre-Phase-2.6 implementation re-ran a full O(N+E) DFS
+	// on every event — N events × O(N+E) at bootstrap turned 5k-object
+	// repos into a quadratic cycle-detection storm. Incremental updates
+	// keep each event O(reachable from new dst) in the healthy case and
+	// fall back to a per-failed-node revalidation only when an edge is
+	// removed.
 	//
 	// REGISTERED BEFORE the controllers: listeners fire in registration
 	// order, so this records preflight failures synchronously BEFORE the
@@ -642,7 +723,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		if id.Kind != manifest.KindKustomization && id.Kind != manifest.KindHelmRelease {
 			return
 		}
-		o.failDependsOnCycles()
+		o.updateDependencyGraphFor(id)
 	}, false)
 	defer unsubCycles()
 
@@ -658,9 +739,50 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		case <-ctx.Done():
 		}
 	})
-	o.src.Start(ctx)
-	o.ksc.Start(ctx)
-	o.hrc.Start(ctx)
+	// Start all three controllers in parallel + pre-warm every
+	// GitRepository's bare mirror at the same time. Three benefits:
+	//   1. Each Controller.Start runs AddListener(flush=true), which
+	//      replays every bootstrap object through the listener under
+	//      the store's write lock. The replays themselves still
+	//      serialize on s.mu, but launching them concurrently removes
+	//      goroutine-startup overhead and stays forward-compatible
+	//      with sharded-store work (Phase 3.1).
+	//   2. The three controllers have mutually exclusive Kind filters
+	//      (source → GitRepository/OCIRepository/Bucket/External,
+	//      ksc → Kustomization, hrc → HelmRelease), so the order in
+	//      which their listeners land in the listener-set slice
+	//      doesn't affect correctness — each filter ignores
+	//      everything outside its own Kind.
+	//   3. The cycle-detection listener registered above runs at
+	//      slice position 0 and stays there: errgroup launches the
+	//      controllers AFTER unsubCycles is in place, so future
+	//      EventObjectAdded fires still hit cycle detection before
+	//      KS/HR controllers' listeners — the precondition for the
+	//      preflight-failure routing comment above.
+	//
+	// Mirror pre-warm runs as a fourth sibling: every GitRepository's
+	// per-URL bare mirror is opened/fetched in a bounded errgroup so
+	// the heavy network I/O overlaps with the lightweight controller
+	// startup. The source controller's reconcile then sees a warm
+	// mirror and OpenOrFetch returns instantly. Pre-warm errors are
+	// logged here, not propagated — the source controller will retry
+	// the same path during reconcile and produce the canonical
+	// per-source status update.
+	//
+	// IMPORTANT: pass the unwrapped ctx, not the errgroup's gctx, into
+	// every controller and the pre-warm. Controller listeners submit
+	// reconcile bodies via task.Coalescer.Submit that propagate ctx
+	// into long-running render goroutines; if those captured the
+	// errgroup's gctx, they'd inherit cancellation the moment g.Wait
+	// returns and abort with "context canceled" before any KS/HR could
+	// finish. The errgroup here is a pure barrier, not a cancellation
+	// scope.
+	var g errgroup.Group
+	g.Go(func() error { o.src.Start(ctx); return nil })
+	g.Go(func() error { o.ksc.Start(ctx); return nil })
+	g.Go(func() error { o.hrc.Start(ctx); return nil })
+	g.Go(func() error { o.prewarmGitMirrors(ctx); return nil })
+	_ = g.Wait()
 	close(startupDone)
 	defer o.Stop()
 
@@ -687,6 +809,59 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		<-done
 		return errors.Join(o.finalize(), ctx.Err())
 	}
+}
+
+// prewarmGitMirrors fires Prewarm against every discovered
+// GitRepository in parallel. Called from Run inside the same errgroup
+// that launches the controller Start calls, so the network I/O
+// overlaps with controller startup. The per-URL mirror lock inside
+// mirror.Cache.OpenOrFetch already serializes duplicate-URL pre-warms,
+// so a bounded errgroup is sufficient — no per-URL coalescing needed
+// here.
+//
+// Pre-warm failures are logged at debug level only. The source
+// controller's reconcile of the same GitRepository will retry the
+// fetch path immediately after Start returns and is the canonical
+// reporter for per-source errors (auth, TLS, missing-secret). Logging
+// at error level here would double-report transient network failures
+// users see in the per-resource status output.
+//
+// No-op when:
+//   - The orchestrator was built without a git fetcher (test path
+//     that strips the default via WithFetcher(KindGitRepository, nil)).
+//   - The git fetcher has no Mirrors configured.
+//   - There are no GitRepository objects in the store.
+func (o *Orchestrator) prewarmGitMirrors(ctx context.Context) {
+	if o.gitFetcher == nil || o.gitFetcher.Mirrors == nil {
+		return
+	}
+	repos := store.ListAs[*manifest.GitRepository](o.store, manifest.KindGitRepository)
+	if len(repos) == 0 {
+		return
+	}
+	limit := o.cfg.Concurrency
+	if limit <= 0 {
+		// Mirror the task.NewBounded default — I/O-bound work, cap at
+		// 4x NumCPU so a tiny machine with many GitRepositories still
+		// makes progress, and a huge fleet doesn't fork-bomb the file
+		// descriptors / git transport pool.
+		limit = runtime.NumCPU() * 4
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(limit)
+	for _, repo := range repos {
+		repo := repo
+		g.Go(func() error {
+			if err := o.gitFetcher.Prewarm(gctx, repo); err != nil {
+				slog.Debug("git: mirror prewarm failed (source controller will retry)",
+					"git_repository", repo.Namespace+"/"+repo.Name,
+					"url", repo.URL,
+					"err", err)
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
 }
 
 // Render is the structured embed-friendly entry point: Bootstrap +

@@ -2,6 +2,8 @@ package helm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
@@ -20,6 +22,16 @@ import (
 
 // Template renders a HelmRelease and returns the rendered manifest as a
 // single YAML string (multiple documents separated by "---" lines).
+//
+// Output is cached by computeTemplateKey when c.templateCache is wired
+// (NewClient's default, sized by ClientOptions.TemplateCacheBytes).
+// Cache hits skip action.Install.RunWithContext — the single largest
+// CPU + allocation consumer in the codebase (cited at ~300 MB on a
+// 200-HR run). Each key folds in every input that affects the
+// rendered bytes (chart content fingerprint, fully-resolved values,
+// render Options, HR-level action.Install fields like ReleaseName,
+// CRDs policy, hooks, post-renderers) so a stale entry never serves
+// a different render.
 func (c *Client) Template(ctx context.Context, hr *manifest.HelmRelease, hrValues map[string]any, opts Options) (string, error) {
 	loaded, err := c.LoadChart(ctx, hr)
 	if err != nil {
@@ -121,11 +133,26 @@ func (c *Client) Template(ctx context.Context, hr *manifest.HelmRelease, hrValue
 	// (handled internally by helm) → chart-named valuesFiles → HR.Values.
 	finalValues := hrValues
 	if len(hr.ChartValuesFiles) > 0 {
-		base, err := mergeChartValuesFiles(loaded.Chart, hr.ChartValuesFiles, hr.IgnoreMissingValuesFiles)
+		base, err := c.mergeChartValuesFiles(loaded.Chart, hr.ChartValuesFiles, hr.IgnoreMissingValuesFiles)
 		if err != nil {
 			return "", fmt.Errorf("helm chart valuesFiles %s/%s: %w", hr.Namespace, hr.Name, err)
 		}
 		finalValues = values.DeepMerge(base, hrValues)
+	}
+
+	// Output cache: the same (chart fingerprint, finalValues, opts,
+	// hr-fields) tuple deterministically produces the same rendered
+	// manifest. Repeat HRs with the same effective spec hit the cache
+	// and skip inst.RunWithContext — the call cited at ~300 MB of
+	// allocations per 200-HR run. The key folds in every render-
+	// affecting input, so cache hits are byte-identical to the
+	// uncached path (also pinned by an integration test).
+	var key string
+	if c.templateCache != nil {
+		key = computeTemplateKey(loaded.Fingerprint, loaded.Chart, finalValues, opts, hr)
+		if cached, ok := c.templateCache.Get(key); ok {
+			return cached, nil
+		}
 	}
 
 	rel, err := inst.RunWithContext(ctx, loaded.Chart, finalValues)
@@ -141,7 +168,76 @@ func (c *Client) Template(ctx context.Context, hr *manifest.HelmRelease, hrValue
 	// rendered output when the HR explicitly enables them or the
 	// CLI overrides. CLI --skip-tests always wins.
 	skipTests := opts.SkipTests || hr.Test == nil || !hr.Test.Enable
-	return releaseManifest(relV1, opts, disableHooks, skipTests), nil
+	out := releaseManifest(relV1, opts, disableHooks, skipTests)
+	if c.templateCache != nil {
+		c.templateCache.Put(key, out)
+	}
+	return out, nil
+}
+
+// mergeChartValuesFiles is the cache-aware entry point: it consults
+// Client.chartValuesCache before re-parsing and stores the canonical
+// merged map on miss. Callers receive a deep clone (defensive-copy
+// convention matching indexCache) — downstream layering DeepMerges
+// the result, which may mutate intermediate sub-maps.
+//
+// Cache key = sha256(chart.Name || chart.Version || joined valuesFiles
+// list || ignoreMissing bit). Distinct chart identities (different
+// name or version, e.g. a chart upgrade landing under the same path)
+// produce distinct keys, so a stale entry never serves a different
+// chart's values. ignoreMissing is folded into the key because two
+// HRs with the same (chart, valuesFiles) but different policies must
+// not share — a missing file is an error in one and skipped in the
+// other.
+func (c *Client) mergeChartValuesFiles(ch *chart.Chart, names []string, ignoreMissing bool) (map[string]any, error) {
+	key := chartValuesCacheKey(ch, names, ignoreMissing)
+	c.chartMu.RLock()
+	cached, ok := c.chartValuesCache[key]
+	c.chartMu.RUnlock()
+	if ok {
+		return manifest.DeepCopyMap(cached), nil
+	}
+	merged, err := mergeChartValuesFiles(ch, names, ignoreMissing)
+	if err != nil {
+		return nil, err
+	}
+	c.chartMu.Lock()
+	// Re-check under the write lock: a sibling goroutine may have
+	// populated the same key between RUnlock and Lock.
+	if existing, ok := c.chartValuesCache[key]; ok {
+		c.chartMu.Unlock()
+		return manifest.DeepCopyMap(existing), nil
+	}
+	c.chartValuesCache[key] = merged
+	c.chartMu.Unlock()
+	return manifest.DeepCopyMap(merged), nil
+}
+
+// chartValuesCacheKey builds the cache key for a (chart, valuesFiles,
+// ignoreMissing) tuple. The hash input is delimited so a chart named
+// "a-b" with version "c" hashes distinctly from a chart named "a"
+// with version "b-c". The trailing ignoreMissing byte separates the
+// two policy variants.
+func chartValuesCacheKey(ch *chart.Chart, names []string, ignoreMissing bool) string {
+	// hash.Hash.Write never returns an error per its contract; drain
+	// the (int, error) tuple so gosec G104 stays quiet.
+	h := sha256.New()
+	if ch != nil && ch.Metadata != nil {
+		_, _ = h.Write([]byte(ch.Metadata.Name))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(ch.Metadata.Version))
+	}
+	_, _ = h.Write([]byte{0})
+	for _, n := range names {
+		_, _ = h.Write([]byte(n))
+		_, _ = h.Write([]byte{0})
+	}
+	if ignoreMissing {
+		_, _ = h.Write([]byte{1})
+	} else {
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // mergeChartValuesFiles merges the named values files (relative paths
@@ -149,6 +245,11 @@ func (c *Client) Template(ctx context.Context, hr *manifest.HelmRelease, hrValue
 // skipped when ignoreMissing is true; otherwise the first missing file
 // is an error. Mirrors helm-controller's chartutil layering: each file
 // is merged on top of the previous one.
+//
+// Pure function — no caching. Client.mergeChartValuesFiles wraps this
+// with the chart-keyed cache layer so production callers never re-parse
+// the same bytes twice. Kept exported-to-package so benchmarks can
+// measure the uncached parse cost in isolation.
 func mergeChartValuesFiles(c *chart.Chart, names []string, ignoreMissing bool) (map[string]any, error) {
 	out := map[string]any{}
 	for _, name := range names {

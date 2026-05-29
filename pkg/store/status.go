@@ -184,59 +184,86 @@ func (s *Store) UpdateStatus(id manifest.NamedResource, status Status, message s
 // lands (e.g. tests). The FailedResources rollup filters phantoms
 // by intersecting against the object map at read time.
 func (s *Store) SetCondition(id manifest.NamedResource, cond Condition) {
-	s.mu.Lock()
-	updated, changed := s.setConditionLocked(id, cond)
+	sh := s.shardFor(id)
+	sh.mu.Lock()
+	updated, changed := sh.setConditionLocked(id, cond)
 	if !changed {
-		s.mu.Unlock()
+		sh.mu.Unlock()
 		return
 	}
 	newInfo, _ := statusInfoFromConditions(updated)
 	dispatch := s.fireUnderLock(EventStatusUpdated, id, newInfo)
-	s.mu.Unlock()
+	sh.mu.Unlock()
 	dispatch()
 }
 
 // setConditionLocked upserts cond into id's condition list and
 // returns the updated list plus whether it actually changed (an
-// identical re-write is a no-op). Caller MUST hold s.mu — used both
+// identical re-write is a no-op). Caller MUST hold sh.mu — used both
 // by SetCondition (which takes the lock itself) and by Refire (which
 // already holds the lock for an atomic check-and-act).
-func (s *Store) setConditionLocked(id manifest.NamedResource, cond Condition) (updated []Condition, changed bool) {
-	prev := s.conditions[id]
-	updated = make([]Condition, 0, len(prev)+1)
-	replaced := false
-	for _, c := range prev {
-		if c.Type == cond.Type {
-			if conditionEqual(c, cond) {
-				return prev, false
-			}
-			updated = append(updated, cond)
-			replaced = true
+//
+// Mutates the existing slice in place when cond.Type already exists.
+// The hot path is "same condition type, new status/message" (every
+// reconcile transition flips the Ready condition); the prior
+// implementation rebuilt the full slice on each hit, allocating an
+// O(len(prev)) backing array per update. In-place overwrite drops
+// that allocation entirely while preserving the no-op fast path
+// (identical re-write returns the original slice with changed=false).
+//
+// Appending a never-seen type still allocates — that's the normal
+// slice-growth path and unavoidable. The Conditions slice is short
+// (Ready + occasional Healthy) so the steady state hits the
+// overwrite branch on every reconcile.
+//
+// The returned slice ALIASES sh.conditions[id] when an existing entry
+// is overwritten (it IS the live backing array). Listeners that read
+// the slice MUST do so before the next write under sh.mu — current
+// callers project a StatusInfo immediately under the same lock, so
+// no aliasing hazard exists today. A future caller that holds onto
+// the returned slice past sh.mu's release would observe further
+// mutations and MUST copy first; statusInfoFromConditions matches
+// this contract by reading values out of the slice in-place.
+func (sh *shard) setConditionLocked(id manifest.NamedResource, cond Condition) (updated []Condition, changed bool) {
+	prev := sh.conditions[id]
+	for i := range prev {
+		if prev[i].Type != cond.Type {
 			continue
 		}
-		updated = append(updated, c)
+		if conditionEqual(prev[i], cond) {
+			return prev, false
+		}
+		prev[i] = cond
+		// sh.conditions[id] already references this backing array —
+		// no reassignment needed. Returning prev (now mutated) keeps
+		// the original allocation alive instead of replacing it.
+		return prev, true
 	}
-	if !replaced {
-		updated = append(updated, cond)
-	}
-	s.conditions[id] = updated
+	// New condition type: extend the slice. This branch is rare
+	// (Ready + Healthy is the only multi-type combination flate
+	// emits today) so the per-call allocation cost is amortized
+	// across the lifetime of the resource.
+	updated = append(prev, cond)
+	sh.conditions[id] = updated
 	return updated, true
 }
 
 // GetStatus returns the Ready-derived StatusInfo for id and whether
 // a Ready condition was present.
 func (s *Store) GetStatus(id manifest.NamedResource) (StatusInfo, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return statusInfoFromConditions(s.conditions[id])
+	sh := s.shardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	return statusInfoFromConditions(sh.conditions[id])
 }
 
 // GetConditions returns a copy of id's condition list. Empty for
 // unknown ids.
 func (s *Store) GetConditions(id manifest.NamedResource) []Condition {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	conds := s.conditions[id]
+	sh := s.shardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	conds := sh.conditions[id]
 	if len(conds) == 0 {
 		return nil
 	}
@@ -269,16 +296,26 @@ func conditionEqual(a, b Condition) bool {
 // Iterating conditions rather than objects is faster when most objects
 // don't have conditions yet (common during bootstrap) — avoids the
 // secondary map lookup for every un-reconciled object.
+//
+// Cross-shard read: walks every shard's conditions/objects. Each
+// shard is RLocked independently in canonical (ascending) order via
+// rLockAll because conditions and objects for a single id always
+// share the same shard, so per-shard reads suffice to detect the
+// phantom — no global lock needed beyond the canonical-order ordering
+// itself, which prevents lockAll-vs-rLockAll deadlocks.
 func (s *Store) FailedResources() map[manifest.NamedResource]StatusInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.rLockAll()
+	defer s.rUnlockAll()
 	out := make(map[manifest.NamedResource]StatusInfo)
-	for id, conds := range s.conditions {
-		if _, inStore := s.objects[id]; !inStore {
-			continue
-		}
-		if info, ok := statusInfoFromConditions(conds); ok && info.Status == StatusFailed {
-			out[id] = info
+	for i := range s.shards {
+		sh := s.shards[i]
+		for id, conds := range sh.conditions {
+			if _, inStore := sh.objects[id]; !inStore {
+				continue
+			}
+			if info, ok := statusInfoFromConditions(conds); ok && info.Status == StatusFailed {
+				out[id] = info
+			}
 		}
 	}
 	return out
