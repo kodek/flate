@@ -8,6 +8,17 @@ branding:
   icon: git-pull-request
 
 inputs:
+  base:
+    description: |
+      baseline git rev (e.g. main, origin/main, HEAD~3, SHA) — materializes the rev's tree
+      to a tempdir and runs in changed-only mode.
+    required: false
+    default: ${{ github.event.repository.default_branch }}
+  cache_dir:
+    description: |
+      on-disk cache root for source artifacts, helm charts, kustomize stages, and persistent render output.
+    required: false
+    default: ${{ runner.temp }}
   version:
     description: |
       flate version to install (e.g. "0.1.25") or "latest". When unset, the action
@@ -43,12 +54,12 @@ runs:
       name: Resolve flate target
       shell: bash
       env:
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_CACHE_DIR: ${{ inputs.cache_dir }}
         INPUT_VERSION: ${{ inputs.version }}
         INPUT_TOKEN: ${{ inputs.token }}
         ACTION_REF: ${{ github.action_ref }}
         ACTION_REPO: ${{ github.action_repository }}
-        CACHE_DIR: ${{ runner.temp }}
-        BASE: ${{ github.event.repository.default_branch }}
       run: | # zizmor: ignore[github-env] FLATE_CACHE_DIR is the action's contract; the value is a runner-provided path joined with a literal
         set -euo pipefail
 
@@ -115,8 +126,8 @@ runs:
         # os.UserCacheDir() per OS. Exporting it via GITHUB_ENV ensures
         # every subsequent `flate` invocation in the job uses it.
         echo "version=${version}" >> "${GITHUB_OUTPUT}"
-        echo "FLATE_BASE=${BASE}" >> "${GITHUB_ENV}"
-        echo "FLATE_CACHE_DIR=${CACHE_DIR}/flate-cache" >> "${GITHUB_ENV}"
+        echo "FLATE_BASE=${INPUTS_BASE}" >> "${GITHUB_ENV}"
+        echo "FLATE_CACHE_DIR=${INPUTS_CACHE_DIR}/flate" >> "${GITHUB_ENV}"
 
     - id: cache
       if: ${{ inputs.cache == 'true' }}
