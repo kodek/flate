@@ -126,8 +126,8 @@ runs:
         # os.UserCacheDir() per OS. Exporting it via GITHUB_ENV ensures
         # every subsequent `flate` invocation in the job uses it.
         echo "version=${version}" >> "${GITHUB_OUTPUT}"
-        echo "FLATE_BASE=${INPUTS_BASE}" >> "${GITHUB_ENV}"
-        echo "FLATE_CACHE_DIR=${INPUTS_CACHE_DIR}/flate" >> "${GITHUB_ENV}"
+        echo "FLATE_BASE=${INPUT_BASE}" >> "${GITHUB_ENV}"
+        echo "FLATE_CACHE_DIR=${INPUT_CACHE_DIR}/flate" >> "${GITHUB_ENV}"
 
     - id: cache
       if: ${{ inputs.cache == 'true' }}
