@@ -48,6 +48,7 @@ runs:
         ACTION_REF: ${{ github.action_ref }}
         ACTION_REPO: ${{ github.action_repository }}
         CACHE_DIR: ${{ runner.temp }}
+        BASE: ${{ github.event.repository.default_branch }}
       run: | # zizmor: ignore[github-env] FLATE_CACHE_DIR is the action's contract; the value is a runner-provided path joined with a literal
         set -euo pipefail
 
@@ -114,6 +115,7 @@ runs:
         # os.UserCacheDir() per OS. Exporting it via GITHUB_ENV ensures
         # every subsequent `flate` invocation in the job uses it.
         echo "version=${version}" >> "${GITHUB_OUTPUT}"
+        echo "FLATE_BASE=${BASE}" >> "${GITHUB_ENV}"
         echo "FLATE_CACHE_DIR=${CACHE_DIR}/flate-cache" >> "${GITHUB_ENV}"
 
     - id: cache
