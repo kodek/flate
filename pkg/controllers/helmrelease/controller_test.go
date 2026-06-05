@@ -54,6 +54,204 @@ func newTestControllerWithOptions(t *testing.T, opts ReconcileOptions) (*Control
 	return c, st
 }
 
+func TestMaterializeHelmChartSource_RepointsAndRegisters(t *testing.T) {
+	c, st := newTestController(t, nil)
+	st.AddObject(&manifest.HelmRepository{
+		Name: "truecharts", Namespace: "flux-system",
+		HelmRepositorySpec: sourcev1.HelmRepositorySpec{
+			URL:  "oci://oci.trueforge.org/truecharts",
+			Type: manifest.RepoTypeOCI,
+		},
+	})
+	hr := &manifest.HelmRelease{
+		Name: "kromgo", Namespace: "apps",
+		Chart: manifest.HelmChart{
+			RepoKind:      manifest.KindHelmRepository,
+			RepoNamespace: "flux-system",
+			RepoName:      "truecharts",
+			Name:          "kromgo",
+			Version:       "3.0.0",
+		},
+	}
+
+	got, repointed := c.materializeHelmChartSource(hr.Named(), hr)
+	if !repointed {
+		t.Fatal("materialize did not report a repoint for a HelmRepository-sourced chart")
+	}
+
+	// Chart repointed to a synthetic HelmChart; name/version kept.
+	if got.Chart.RepoKind != manifest.KindHelmChart {
+		t.Fatalf("RepoKind = %q, want HelmChart", got.Chart.RepoKind)
+	}
+	if got.Chart.RepoNamespace != "flux-system" {
+		t.Errorf("RepoNamespace = %q, want flux-system", got.Chart.RepoNamespace)
+	}
+	if got.Chart.Name != "kromgo" || got.Chart.Version != "3.0.0" {
+		t.Errorf("chart name/version = %q/%q, want kromgo/3.0.0", got.Chart.Name, got.Chart.Version)
+	}
+
+	// Synthetic HelmChart registered for the source controller, seeded
+	// Pending so the chart-source depwait never observes it as absent.
+	synID := manifest.NamedResource{Kind: manifest.KindHelmChart, Namespace: got.Chart.RepoNamespace, Name: got.Chart.RepoName}
+	obj := st.GetByName(manifest.KindHelmChart, synID.Namespace, synID.Name)
+	if obj == nil {
+		t.Fatalf("synthetic HelmChart %s not added to store", synID)
+	}
+	if hc, ok := obj.(*manifest.HelmChartSource); !ok {
+		t.Fatalf("stored object is %T, want *manifest.HelmChartSource", obj)
+	} else if hc.Chart != "kromgo" || hc.Version != "3.0.0" ||
+		hc.SourceRef.Kind != manifest.KindHelmRepository || hc.SourceRef.Name != "truecharts" {
+		t.Errorf("synthetic HelmChart = %+v, want chart kromgo@3.0.0 sourceRef HelmRepository/truecharts", hc)
+	}
+	if info, ok := st.GetStatus(synID); !ok || info.Status != store.StatusPending {
+		t.Errorf("synthetic status = %+v (ok=%v), want Pending", info, ok)
+	}
+}
+
+// TestMaterializeHelmChartSource_IdempotentReSeed pins the idempotency fix:
+// once the synthetic HelmChart has been fetched (Ready), re-running materialize
+// — a parent-KS re-emit, or a SECOND HelmRelease that shares the same
+// (repo, chart, version) synthetic id — must NOT flap it back to Pending. A
+// byte-identical AddObject fires no EventObjectAdded, so the source controller
+// would never re-fetch to restore Ready and the chart-source await would wedge
+// until timeout. The Pending seed therefore fires only when status is absent.
+func TestMaterializeHelmChartSource_IdempotentReSeed(t *testing.T) {
+	c, st := newTestController(t, nil)
+	st.AddObject(&manifest.HelmRepository{
+		Name: "bitnami", Namespace: "flux-system",
+		HelmRepositorySpec: sourcev1.HelmRepositorySpec{URL: "https://charts.example/bitnami"},
+	})
+	mkHR := func(name string) *manifest.HelmRelease {
+		return &manifest.HelmRelease{
+			Name: name, Namespace: "apps",
+			Chart: manifest.HelmChart{
+				RepoKind: manifest.KindHelmRepository, RepoNamespace: "flux-system", RepoName: "bitnami",
+				Name: "redis", Version: "1.0.0",
+			},
+		}
+	}
+
+	// First HR materializes the synthetic and seeds it Pending.
+	hrA := mkHR("redis-a")
+	got1, repointed := c.materializeHelmChartSource(hrA.Named(), hrA)
+	if !repointed {
+		t.Fatal("first materialize did not repoint")
+	}
+	synID := manifest.NamedResource{Kind: manifest.KindHelmChart, Namespace: got1.Chart.RepoNamespace, Name: got1.Chart.RepoName}
+
+	// Source controller fetches it and marks it Ready.
+	st.UpdateStatus(synID, store.StatusReady, "")
+
+	// A second HR sharing the same (repo, chart, version) synthesizes the SAME
+	// id; re-materialize must leave the Ready status untouched.
+	hrB := mkHR("redis-b")
+	got2, repointed := c.materializeHelmChartSource(hrB.Named(), hrB)
+	if !repointed {
+		t.Fatal("second materialize did not repoint")
+	}
+	if got2.Chart.RepoName != synID.Name {
+		t.Fatalf("second HR synthesized id %q, want shared %q", got2.Chart.RepoName, synID.Name)
+	}
+	if info, ok := st.GetStatus(synID); !ok || info.Status != store.StatusReady {
+		t.Errorf("synthetic status flapped to %+v (ok=%v), want still Ready", info, ok)
+	}
+
+	// Re-emitting the SAME HR (a fresh reconcile snapshot, still
+	// HelmRepository-sourced) is likewise idempotent — no flap.
+	reHRA := mkHR("redis-a")
+	if _, repointed := c.materializeHelmChartSource(reHRA.Named(), reHRA); !repointed {
+		t.Fatal("re-materialize of the same HR did not repoint")
+	}
+	if info, ok := st.GetStatus(synID); !ok || info.Status != store.StatusReady {
+		t.Errorf("synthetic status flapped to %+v after re-emit, want still Ready", info)
+	}
+}
+
+// TestMaterializeHelmChartSource_LateArrival pins the contract reconcile relies
+// on: materialize is a no-op while the HelmRepository is absent from the Store
+// (e.g. render-emitted by a sibling and not yet landed) and repoints only once
+// it's present. reconcile awaits the declared source to Ready before calling
+// materialize, so this present-then-repoint path is the one it always takes —
+// no loop needed.
+func TestMaterializeHelmChartSource_LateArrival(t *testing.T) {
+	c, st := newTestController(t, nil)
+	hr := &manifest.HelmRelease{
+		Name: "kromgo", Namespace: "apps",
+		Chart: manifest.HelmChart{
+			RepoKind: manifest.KindHelmRepository, RepoNamespace: "flux-system", RepoName: "truecharts",
+			Name: "kromgo", Version: "3.0.0",
+		},
+	}
+
+	// Pass 1: HelmRepository not in the Store yet — must not repoint.
+	if _, repointed := c.materializeHelmChartSource(hr.Named(), hr); repointed {
+		t.Fatal("repointed while the HelmRepository was absent (must be a no-op)")
+	}
+
+	// HelmRepository arrives mid-run (render-emitted / lazily promoted).
+	st.AddObject(&manifest.HelmRepository{
+		Name: "truecharts", Namespace: "flux-system",
+		HelmRepositorySpec: sourcev1.HelmRepositorySpec{
+			URL:  "oci://oci.trueforge.org/truecharts",
+			Type: manifest.RepoTypeOCI,
+		},
+	})
+
+	// Pass 2: now present — must repoint to the synthetic HelmChart.
+	if _, repointed := c.materializeHelmChartSource(hr.Named(), hr); !repointed {
+		t.Fatal("did not repoint once the HelmRepository was present")
+	}
+}
+
+// TestMaterializeHelmChartSource_HTTPRepoMaterializes pins the behavior flip:
+// a type=default (HTTP) HelmRepository chart is now ALSO materialized into a
+// synthetic HelmChart (previously it was left to an inline helm.Client pull).
+// The oci-vs-http decision is the fetcher's; the controller repoints uniformly.
+func TestMaterializeHelmChartSource_HTTPRepoMaterializes(t *testing.T) {
+	c, st := newTestController(t, nil)
+	st.AddObject(&manifest.HelmRepository{
+		Name: "bitnami", Namespace: "flux-system",
+		HelmRepositorySpec: sourcev1.HelmRepositorySpec{URL: "https://charts.example/bitnami"},
+	})
+	hr := &manifest.HelmRelease{
+		Name: "redis", Namespace: "apps",
+		Chart: manifest.HelmChart{
+			RepoKind: manifest.KindHelmRepository, RepoNamespace: "flux-system", RepoName: "bitnami",
+			Name: "redis", Version: "1.0.0",
+		},
+	}
+	got, repointed := c.materializeHelmChartSource(hr.Named(), hr)
+	if !repointed || got.Chart.RepoKind != manifest.KindHelmChart {
+		t.Fatalf("HTTP HelmRepository was not materialized: %+v (repointed=%v)", got.Chart, repointed)
+	}
+	if hc, ok := st.GetByName(manifest.KindHelmChart, got.Chart.RepoNamespace, got.Chart.RepoName).(*manifest.HelmChartSource); !ok || hc.SourceRef.Name != "bitnami" {
+		t.Errorf("synthetic HelmChart does not reference the bitnami repo: %v", got.Chart)
+	}
+}
+
+// TestMaterializeHelmChartSource_EmptyVersion guards the preparePrereqs
+// placeholder gotcha: a HelmRepository chart with no version still
+// materializes into a (versionless) HelmChart rather than being mistaken for
+// an unresolved chartRef:HelmChart placeholder.
+func TestMaterializeHelmChartSource_EmptyVersion(t *testing.T) {
+	c, st := newTestController(t, nil)
+	st.AddObject(&manifest.HelmRepository{
+		Name: "bitnami", Namespace: "flux-system",
+		HelmRepositorySpec: sourcev1.HelmRepositorySpec{URL: "https://charts.example/bitnami"},
+	})
+	hr := &manifest.HelmRelease{
+		Name: "redis", Namespace: "apps",
+		Chart: manifest.HelmChart{
+			RepoKind: manifest.KindHelmRepository, RepoNamespace: "flux-system", RepoName: "bitnami",
+			Name: "redis", // Version omitted
+		},
+	}
+	got, repointed := c.materializeHelmChartSource(hr.Named(), hr)
+	if !repointed || got.Chart.RepoKind != manifest.KindHelmChart {
+		t.Fatalf("empty-version HelmRepository chart not materialized: %+v (repointed=%v)", got.Chart, repointed)
+	}
+}
+
 func TestController_SuspendedShortCircuitsToReady(t *testing.T) {
 	_, st := newTestController(t, nil)
 	hr := &manifest.HelmRelease{

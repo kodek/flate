@@ -4,9 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"log/slog"
 	"maps"
-	"os"
 	"sync"
 
 	"github.com/home-operations/flate/pkg/change"
@@ -24,6 +22,7 @@ import (
 	"github.com/home-operations/flate/pkg/source/external"
 	"github.com/home-operations/flate/pkg/source/git"
 	"github.com/home-operations/flate/pkg/source/git/mirror"
+	"github.com/home-operations/flate/pkg/source/helmchart"
 	"github.com/home-operations/flate/pkg/source/oci"
 	"github.com/home-operations/flate/pkg/store"
 	"github.com/home-operations/flate/pkg/task"
@@ -49,8 +48,6 @@ type Config struct {
 	HelmOptions helm.Options
 	// WipeSecrets controls Secret cleartext placeholders.
 	WipeSecrets bool
-	// EnableOCI turns on OCIRepository reconciliation.
-	EnableOCI bool
 	// AllowMissingSecrets converts source auth-secret-not-found errors
 	// into skips and omits HelmRelease valuesFrom Secret/ConfigMap refs
 	// that cannot materialize in the offline tree. Skipped source
@@ -86,6 +83,14 @@ type Config struct {
 	// unaffected. Sensible default for I/O-bound work is
 	// runtime.NumCPU() * 4.
 	Concurrency int
+
+	// SourceRetry tunes the bounded, classified retry applied to every
+	// source fetch (Git/OCI/Bucket) on transient network failures —
+	// connection resets, refused connections, dial/IO timeouts. Permanent
+	// errors (bad path, missing secret, not-found) fail fast. Attempts
+	// <= 1 disables retry; the CLI defaults it to 3. See
+	// source.RetryConfig / source.WithRetry.
+	SourceRetry source.RetryConfig
 
 	// HelmTemplateCacheBytes caps the in-memory helm template-output
 	// cache. Repeat HRs with identical effective inputs (chart
@@ -282,13 +287,9 @@ func New(cfg Config) (*Orchestrator, error) {
 	}
 	staging, err := kustomize.NewStagingCacheFromLayout(layout, cfg.StageCacheBytes)
 	if err != nil {
-		// helmClient already created tmpDir + cacheDir under the
-		// cache root. Leaving them would leak a temp directory per
-		// failed orchestrator construction (e.g. retry-on-bad-config
-		// loops in a test harness). The helm client itself has no
-		// Close; the best-effort cleanup is to drop the dirs we own.
-		_ = os.RemoveAll(layout.HelmTmp())
-		_ = os.RemoveAll(layout.HelmCache())
+		// Nothing on disk to clean up: helm.NewClientWithOptions creates no
+		// directories at construction (the disk render cache is lazy), and the
+		// HelmChart fetcher's helm-tmp dir isn't created until later in New.
 		return nil, err
 	}
 
@@ -299,15 +300,11 @@ func New(cfg Config) (*Orchestrator, error) {
 		s, _ := store.GetByName[*manifest.Secret](st, manifest.KindSecret, ns, name)
 		return s
 	}
-	helmClient.SetSecretGetter(secretGet)
 	// Route helm.Client's source-CR lookups straight through the canonical
 	// Store rather than maintaining a duplicate registry the HR controller
 	// would otherwise have to keep in sync via Add* push-API calls.
-	helmClient.SetSourceResolver(helm.NewStoreSourceResolver(st))
-	// Yield the worker-pool slot during OCI pulls so concurrent helm
-	// renders don't starve. Passes task.Service.YieldSlot through as
-	// a callback so pkg/helm doesn't have to import pkg/task.
-	helmClient.SetTaskYield(ts.YieldSlot)
+	resolver := helm.NewStoreSourceResolver(st)
+	helmClient.SetSourceResolver(resolver)
 	srcCtrl := sourcectrl.New(st, ts)
 	// Every kind-specific fetcher is wired through source.Wrap so the
 	// concrete Fetch signature stays typed (no per-impl type
@@ -326,29 +323,42 @@ func New(cfg Config) (*Orchestrator, error) {
 		manifest.KindExternalArtifact, &external.Fetcher{})
 	srcCtrl.Fetchers[manifest.KindBucket] = source.Wrap(
 		manifest.KindBucket, &bucket.Fetcher{Cache: cache, Secrets: secretGet})
-	// HelmRepository: existence-only — flate resolves charts via the
-	// Helm client's registry/repo machinery directly, the controller
-	// just needs the resource to land in Ready so HelmRelease deps
-	// unblock.
+	// HelmRepository: existence-only — the controller just needs the
+	// resource in Ready so HelmRelease deps unblock. The chart itself is
+	// fetched per (chart, version) through a synthesized HelmChart (see
+	// materializeHelmChartSource), so every chart kind routes through the
+	// source controller uniformly.
 	srcCtrl.Fetchers[manifest.KindHelmRepository] = source.ExistenceFetcher{}
-	if cfg.EnableOCI {
-		ociFetcher := &oci.Fetcher{Cache: cache, RegistryConfig: cfg.RegistryConfig, Secrets: secretGet}
-		srcCtrl.Fetchers[manifest.KindOCIRepository] = source.Wrap(
-			manifest.KindOCIRepository, ociFetcher)
-		// Share the same fetcher with helm.Client so HelmRepository
-		// (type=oci) and OCIRepository chart resolution both route
-		// through one OCI pull path — spec.verify / certSecretRef /
-		// proxySecretRef / insecure / layerSelector / ignore apply
-		// uniformly. Without this, type=oci would silently drop
-		// those fields (helm-side fallback used the registry client
-		// with no auth/TLS surface).
-		helmClient.SetOCIPuller(ociFetcher)
-	} else {
-		// --enable-oci=false: skip the real fetch but still mark each
-		// OCIRepository Ready so HRs that dependsOn one don't time out.
-		// helm.Client's OCIPuller stays nil, falling back to the
-		// registry-client pull (matches prior EnableOCI=false behavior).
-		srcCtrl.Fetchers[manifest.KindOCIRepository] = source.ExistenceFetcher{}
+	// Bare OCI fetcher, used two ways: as the standalone OCIRepository
+	// fetcher, and as the HelmChart fetcher's OCI-branch delegate (so
+	// OCI-backed HelmRepository charts pull with the same auth/TLS/verify).
+	// Every OCIRepository real-fetches through the source controller, like
+	// every other source kind — there is no existence-only OCI path.
+	// Embedders that want one can still WithFetcher a source.ExistenceFetcher.
+	// Not separately retry-wrapped: each consuming fetcher's own WithRetry
+	// wrapper owns retries.
+	ociFetcher := &oci.Fetcher{Cache: cache, RegistryConfig: cfg.RegistryConfig, Secrets: secretGet}
+	srcCtrl.Fetchers[manifest.KindOCIRepository] = source.Wrap(
+		manifest.KindOCIRepository, ociFetcher)
+	// HelmChart: the single authoritative chart fetcher. The HR controller
+	// synthesizes a HelmChart per (chart, version, repo) for every
+	// HelmRepository-sourced chart; this fetcher pulls it — HTTP repos via
+	// helm's getter, OCI repos via the OCI fetcher above.
+	hcFetcher, err := helmchart.New(secretGet, resolver.HelmRepository, ociFetcher, cache, layout)
+	if err != nil {
+		return nil, err
+	}
+	srcCtrl.Fetchers[manifest.KindHelmChart] = source.Wrap(
+		manifest.KindHelmChart, hcFetcher)
+	// Wrap every registered fetcher in the classified retry decorator so
+	// transient network failures (connection resets, refused connections,
+	// timeouts) get a bounded retry the same way across all source kinds,
+	// while permanent errors (bad path, auth, not-found) still fail fast.
+	// A no-op when retry is disabled (cfg.SourceRetry.Attempts <= 1), and
+	// any future kind picks this up automatically. Reassigning existing
+	// map values during range is well-defined (no keys added/removed).
+	for kind, f := range srcCtrl.Fetchers {
+		srcCtrl.Fetchers[kind] = source.WithRetry(f, cfg.SourceRetry)
 	}
 	o := &Orchestrator{
 		cfg:            cfg,
@@ -432,77 +442,11 @@ func (o *Orchestrator) Bootstrap(ctx context.Context) error {
 	o.existence = res.Existence
 
 	o.failDependsOnCycles()
-	o.warnOnDisabledOCIFeatures()
-	o.warnOnKSOCISourceRefWithoutOCI()
 	if err := o.buildChangeFilter(res.RepoRoot); err != nil {
 		return err
 	}
 	o.bootstrapped = true
 	return nil
-}
-
-// warnOnDisabledOCIFeatures surfaces the EnableOCI=false footgun: with
-// the source.ExistenceFetcher wired for OCIRepository, spec.verify,
-// spec.layerSelector, spec.certSecretRef, spec.proxySecretRef,
-// spec.insecure, and spec.ignore are all parsed from the manifests but
-// silently discarded — the source is marked Ready without a real
-// fetch. A user who configured spec.verify deserves to SEE that
-// flate skipped verification rather than discover it via "passed in
-// flate, failed in cluster".
-func (o *Orchestrator) warnOnDisabledOCIFeatures() {
-	if o.cfg.EnableOCI {
-		return
-	}
-	for _, repo := range store.ListAs[*manifest.OCIRepository](o.store, manifest.KindOCIRepository) {
-		var fields []string
-		if repo.Verify != nil {
-			fields = append(fields, "spec.verify")
-		}
-		if repo.LayerSelector != nil {
-			fields = append(fields, "spec.layerSelector")
-		}
-		if repo.CertSecretRef != nil {
-			fields = append(fields, "spec.certSecretRef")
-		}
-		if repo.ProxySecretRef != nil {
-			fields = append(fields, "spec.proxySecretRef")
-		}
-		if repo.Insecure {
-			fields = append(fields, "spec.insecure")
-		}
-		if repo.Ignore != nil {
-			fields = append(fields, "spec.ignore")
-		}
-		if len(fields) == 0 {
-			continue
-		}
-		slog.Warn("OCIRepository spec fields ignored — EnableOCI=false wires ExistenceFetcher",
-			"oci_repository", repo.Namespace+"/"+repo.Name,
-			"ignored_fields", fields)
-	}
-}
-
-// warnOnKSOCISourceRefWithoutOCI surfaces the EnableOCI=false +
-// KS-sourceRef=OCIRepository combo at bootstrap. Without OCI
-// reconciliation, source/ExistenceFetcher gives the OCIRepository a
-// Ready status but NO SourceArtifact — a Kustomization that needs
-// the artifact for spec.path resolution then dies at reconcile with
-// the cryptic "artifact not found", far from where the actual
-// configuration error lives. Warn up front so the operator either
-// enables OCI (--enable-oci=true / default) or restructures the KS
-// to use a GitRepository source.
-func (o *Orchestrator) warnOnKSOCISourceRefWithoutOCI() {
-	if o.cfg.EnableOCI {
-		return
-	}
-	for _, ks := range store.ListAs[*manifest.Kustomization](o.store, manifest.KindKustomization) {
-		if ks.SourceKind != manifest.KindOCIRepository {
-			continue
-		}
-		slog.Warn("Kustomization sourceRef points at OCIRepository but --enable-oci=false; the synthesized existence-only artifact has no LocalPath and spec.path resolution will fail at render time",
-			"kustomization", ks.Namespace+"/"+ks.Name,
-			"source_ref", ks.SourceNamespace+"/"+ks.SourceName)
-	}
 }
 
 // replacePreflightFailures replaces the current preflight-failure map

@@ -10,12 +10,10 @@ import (
 
 	chart "helm.sh/helm/v4/pkg/chart/v2"
 	"helm.sh/helm/v4/pkg/chart/v2/loader"
-	"helm.sh/helm/v4/pkg/registry"
 
 	"github.com/home-operations/flate/internal/keylock"
 	"github.com/home-operations/flate/pkg/manifest"
 	"github.com/home-operations/flate/pkg/source"
-	"github.com/home-operations/flate/pkg/source/blob"
 	"github.com/home-operations/flate/pkg/source/cacheroot"
 	"github.com/home-operations/flate/pkg/store"
 	"github.com/home-operations/flate/pkg/values"
@@ -26,45 +24,14 @@ import (
 // The orchestrator wires the same closure into both.
 type SecretGetter = source.SecretGetter
 
-// OCIPuller fetches an OCI artifact into a content-addressed slot
-// directory. Helm.Client uses it to route HelmRepository(type=oci)
-// and OCIRepository chart resolution through the same machinery as
-// source/oci.Fetcher — applying spec.verify / certSecretRef /
-// proxySecretRef / insecure / layerSelector / ignore uniformly
-// regardless of whether the chart was referenced via OCIRepository
-// or HelmRepository(type=oci). When nil, helm.Client falls back to
-// its built-in registry-client pull (no TLS/auth/verify surface) —
-// matches the pre-unification behavior for EnableOCI=false runs.
-//
-// source/oci.Fetcher satisfies this interface verbatim (type alias).
-type OCIPuller = source.TypedFetcher[*manifest.OCIRepository]
-
 // Client renders HelmReleases. Construct with NewClient.
 type Client struct {
-	tmpDir   string
-	cacheDir string
-
 	mu sync.RWMutex
 	// resolver is the canonical (and only) source-lookup surface.
 	// Embedders MUST call SetSourceResolver before any Template call;
 	// the orchestrator wires NewStoreSourceResolver(store) at
 	// construction.
 	resolver SourceResolver
-	registry *registry.Client
-	secrets  SecretGetter
-	// ociPuller, when wired, routes both OCIRepository chart
-	// resolution and HelmRepository(type=oci) chart resolution
-	// through source/oci.Fetcher — so spec.verify / cert /
-	// proxy / layerSelector / ignore all apply uniformly. Nil
-	// retains the legacy registry-client pull (EnableOCI=false
-	// path: no auth/TLS surface, anonymous pulls only).
-	ociPuller OCIPuller
-
-	// taskYield, when set, wraps long-running network I/O (OCI
-	// pulls) so the worker-pool slot is released for the duration.
-	// nil = no yield (legacy behavior for embedders without a task
-	// pool). See SetTaskYield.
-	taskYield func(fn func())
 
 	// chartCache memoizes parsed *chart.Chart by on-disk path. Helm's
 	// loader.Load reparses the entire tgz on every call — for repos
@@ -91,7 +58,7 @@ type Client struct {
 	// stack (common: bjw-s app-template with a fixed set of layered
 	// values-*.yaml files) re-yaml.Unmarshal'd the same bytes once per
 	// HR. The cache holds the canonical merged map; callers receive
-	// a deep clone (defensive-copy convention matching indexCache)
+	// a deep clone (defensive-copy convention shared with chartCache)
 	// because downstream DeepMerge layering mutates the result.
 	//
 	// Guarded by chartMu — same lock as chartCache. The two caches
@@ -102,26 +69,6 @@ type Client struct {
 	// reduction.
 	chartValuesCache map[string]map[string]any
 
-	// indexCache holds parsed HelmRepository index.yaml documents for
-	// the lifetime of this Client. The same Client serves every
-	// HelmRelease in one orchestrator run, so N HRs pointing at the
-	// same HelmRepository now share a single index fetch instead of
-	// re-downloading it N times. Keyed by `<ns>/<name>@<indexURL>`
-	// so two HelmRepository CRs that happen to share a URL still get
-	// distinct entries (their auth contexts may differ, and a private
-	// feed can serve different bytes per credential set).
-	//
-	// In-process only — there is no on-disk index cache yet; cross-
-	// run reuse with etag/If-Modified-Since is a future layer.
-	indexCache sync.Map // map[string]*repo.IndexFile
-	indexLocks *keylock.KeyMap[string]
-
-	// chartBlobs is the content-addressed storage for downloaded helm
-	// chart tarballs. HelmRepository charts hit this cache only when
-	// index.yaml supplies a digest; entries without a digest are
-	// treated as mutable and downloaded on each run.
-	chartBlobs *blob.Store
-
 	// valuesCache memoizes parsed-YAML output of ExpandValueReferences
 	// across HRs in this Client's lifetime. One HR with 10 valuesFrom
 	// refs hits each entry once; M HRs sharing a platform-wide values
@@ -129,13 +76,6 @@ type Client struct {
 	// Lives for the Client lifetime — re-creating per Template call
 	// would defeat the cross-HR sharing that delivers the win.
 	valuesCache *values.Cache
-
-	// chartDownloadLocks serializes concurrent downloads of the same
-	// chart tarball so two reconcilers don't race writing the same
-	// cache file. Keyed by content-address digest (when available) or
-	// a name+version+URL token — matches the pattern of chartLoadLocks
-	// and indexLocks above.
-	chartDownloadLocks *keylock.KeyMap[string]
 
 	// templateCache memoizes Template's rendered manifest output keyed
 	// by computeTemplateKey (chart fingerprint + resolved values +
@@ -215,12 +155,11 @@ func DefaultClientOptions() ClientOptions {
 }
 
 // NewClient constructs a Client backed by the supplied Layout with
-// project-wide defaults (DefaultClientOptions). The helm-tmp/ and
-// helm-cache/ directories are taken from the Layout — helm.Client
-// never composes its own paths. The chart-tarball CAS is rooted at
-// the SHARED <root>/blobs/sha256/ blob store so identical chart
-// bytes deduplicate across HelmRepositories and across orchestrator
-// embedders.
+// project-wide defaults (DefaultClientOptions). helm.Client reads
+// already-fetched charts off disk and composes no cache paths of its own —
+// chart bytes live in the shared source.Cache (the content-addressed
+// <root>/blobs/sha256/ store, so identical chart bytes dedup across
+// HelmRepositories and embedders), populated by the source controller.
 //
 // Disk-backed template-output cache defaults to enabled at
 // DefaultRenderCacheBytes, rooted at layout.RenderHelmCache(). When
@@ -250,29 +189,11 @@ func NewClientWithOptions(layout cacheroot.Layout, opts ClientOptions) (*Client,
 		// keeps working.
 		layout.Root = filepath.Join(os.TempDir(), "flate-cache")
 	}
-	tmpDir := layout.HelmTmp()
-	cacheDir := layout.HelmCache()
-	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
-		return nil, err
-	}
-	reg, err := registry.NewClient(registry.ClientOptCredentialsFile(""))
-	if err != nil {
-		return nil, fmt.Errorf("helm registry: %w", err)
-	}
 	return &Client{
-		tmpDir:             tmpDir,
-		cacheDir:           cacheDir,
-		registry:           reg,
-		chartCache:         map[string]chartCacheEntry{},
-		chartValuesCache:   map[string]map[string]any{},
-		chartLoadLocks:     keylock.New[string](),
-		indexLocks:         keylock.New[string](),
-		chartDownloadLocks: keylock.New[string](),
-		chartBlobs:         blob.NewStore(layout),
-		valuesCache:        values.NewCache(),
+		chartCache:       map[string]chartCacheEntry{},
+		chartValuesCache: map[string]map[string]any{},
+		chartLoadLocks:   keylock.New[string](),
+		valuesCache:      values.NewCache(),
 		templateCache: newTemplateCache(
 			opts.TemplateCacheBytes,
 			newDiskRenderCache(opts.RenderCacheRoot, opts.RenderCacheBytes),
@@ -286,45 +207,6 @@ func NewClientWithOptions(layout cacheroot.Layout, opts ClientOptions) (*Client,
 // Clients constructed via NewClient.
 func (c *Client) ValuesCache() *values.Cache { return c.valuesCache }
 
-// SetSecretGetter installs a Secret lookup function so HelmRepository
-// SecretRef credentials can be resolved at pull time. Safe to call
-// before any Add* — typically once at orchestrator construction.
-func (c *Client) SetSecretGetter(g SecretGetter) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.secrets = g
-}
-
-// SetOCIPuller installs the OCI fetcher helm.Client routes
-// HelmRepository(type=oci) and OCIRepository chart resolution
-// through. The orchestrator wires source/oci.Fetcher when
-// EnableOCI=true; embedders without one (or EnableOCI=false runs)
-// leave it nil and helm.Client falls back to its built-in
-// registry-client pull. Safe to call before any Template call.
-func (c *Client) SetOCIPuller(p OCIPuller) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.ociPuller = p
-}
-
-// ociPullerSnapshot returns the configured OCIPuller under a read
-// lock. Returns nil when none was wired — callers fall back to the
-// registry-client path.
-func (c *Client) ociPullerSnapshot() OCIPuller {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.ociPuller
-}
-
-// secretGetter returns the configured SecretGetter under a read lock —
-// the snapshot helper helmRepoAuthOptions / helmRepoTLSOptions use so
-// neither has to inline the RLock-copy-RUnlock dance.
-func (c *Client) secretGetter() SecretGetter {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.secrets
-}
-
 // SetSourceResolver installs the canonical lookup surface for
 // HelmRepository / OCIRepository / local-artifact sources. helm.Client
 // reads through the resolver on every Template call — there's no
@@ -336,37 +218,6 @@ func (c *Client) SetSourceResolver(r SourceResolver) {
 	c.resolver = r
 }
 
-// SetTaskYield installs a callback that the helm client uses to
-// release its worker-pool slot during long-running network I/O
-// (OCI pulls). The orchestrator wires this to
-// task.Service.YieldSlot so concurrent helm renders don't block
-// the pool while one of them is mid-pull. nil disables the yield
-// (the I/O runs while still holding the slot — the legacy
-// behavior for embedders without a task pool).
-//
-// Kept as a callback rather than a direct task.Service dependency to
-// avoid importing pkg/task into pkg/helm — the orchestrator wires
-// the function reference and helm stays dependency-free.
-func (c *Client) SetTaskYield(yield func(fn func())) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.taskYield = yield
-}
-
-// yieldDuring invokes fn under the configured task-slot yield, or
-// directly when no yield is wired. fn typically wraps a long
-// network round-trip.
-func (c *Client) yieldDuring(fn func()) {
-	c.mu.RLock()
-	y := c.taskYield
-	c.mu.RUnlock()
-	if y == nil {
-		fn()
-		return
-	}
-	y(fn)
-}
-
 // Resolver returns the configured SourceResolver, or nil when none
 // has been wired. Exposed so the HelmRelease controller (and embedders
 // calling Prepare) can pass resolver.HelmChart into ResolveChartRef
@@ -375,14 +226,6 @@ func (c *Client) Resolver() SourceResolver {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.resolver
-}
-
-func (c *Client) resolveHelmRepo(hr *manifest.HelmRelease) *manifest.HelmRepository {
-	r := c.Resolver()
-	if r == nil {
-		return nil
-	}
-	return r.HelmRepository(hr.Chart.RepoNamespace, hr.Chart.RepoName)
 }
 
 func (c *Client) resolveOCIRepo(hr *manifest.HelmRelease) *manifest.OCIRepository {
@@ -404,7 +247,7 @@ func (c *Client) resolveLocalSource(hr *manifest.HelmRelease) *store.SourceArtif
 // LocateChart returns a filesystem path to the chart referenced by hr.
 // The caller is responsible for cleanup (chart paths inside the cache
 // are reused across calls; paths inside the tmp dir are not).
-func (c *Client) LocateChart(ctx context.Context, hr *manifest.HelmRelease) (string, error) {
+func (c *Client) LocateChart(hr *manifest.HelmRelease) (string, error) {
 	if hr == nil {
 		return "", errors.New("nil HelmRelease")
 	}
@@ -412,9 +255,18 @@ func (c *Client) LocateChart(ctx context.Context, hr *manifest.HelmRelease) (str
 	case manifest.KindGitRepository, manifest.KindBucket, manifest.KindExternalArtifact:
 		return c.locateLocalChart(hr)
 	case manifest.KindOCIRepository:
-		return c.locateOCIChart(ctx, hr)
+		return c.locateOCIChart(hr)
+	case manifest.KindHelmChart:
+		return c.locateHelmChart(hr)
 	case manifest.KindHelmRepository, "":
-		return c.locateHelmRepoChart(ctx, hr)
+		// HelmRepository charts are materialized into a synthetic HelmChart
+		// by the orchestrator's HR controller before render (see
+		// materializeHelmChartSource), reaching LocateChart as KindHelmChart
+		// above. Hitting this case means LocateChart ran on an
+		// un-materialized HelmRepository chart — unsupported; embedders must
+		// render through the orchestrator (or pre-synthesize a HelmChart).
+		return "", fmt.Errorf("%w: HelmRepository chart %s reached LocateChart unmaterialized — render via the orchestrator",
+			manifest.ErrInput, hr.Chart.RepoFullName())
 	}
 	return "", fmt.Errorf("%w: unsupported chart repo kind %s", manifest.ErrInput, hr.Chart.RepoKind)
 }
@@ -424,10 +276,11 @@ func (c *Client) LocateChart(ctx context.Context, hr *manifest.HelmRelease) (str
 // reparses the tgz (and recompiles values.schema.json) on every call,
 // which is a significant render-time hot spot when many HelmReleases
 // share a base chart (bjw-s app-template, podinfo, common-library, …).
-// Path is content-addressed by Helm's own cacher (name-version-digest),
-// so this is safe across reconciles.
+// Path comes from the source cache (a content-addressed blob for HTTP
+// tarballs, a ref-keyed slot for OCI) and is stable across reconciles; the
+// per-path (mtime,size) re-check below guards a mutable OCI re-push.
 func (c *Client) LoadChart(ctx context.Context, hr *manifest.HelmRelease) (ChartLoadResult, error) {
-	path, err := c.LocateChart(ctx, hr)
+	path, err := c.LocateChart(hr)
 	if err != nil {
 		return ChartLoadResult{}, err
 	}
