@@ -116,14 +116,24 @@ func rewriteURLResources(ctx context.Context, cache *StagingCache, ksFile string
 		if entry.Kind != yaml.ScalarNode {
 			continue
 		}
-		if !isHTTPURL(entry.Value) {
+		var (
+			localRef string
+			fetchErr error
+		)
+		if spec, ok := parseGitRemoteSpec(entry.Value); ok {
+			localRef, fetchErr = fetchGitResource(ctx, cache, dir, entry.Value, spec)
+			if fetchErr != nil {
+				return fmt.Errorf("remote git base %s: %w", entry.Value, fetchErr)
+			}
+		} else if isHTTPURL(entry.Value) {
+			localRef, fetchErr = fetchRemoteResource(ctx, cache, dir, entry.Value)
+			if fetchErr != nil {
+				return fmt.Errorf("remote resource %s: %w", entry.Value, fetchErr)
+			}
+		} else {
 			continue
 		}
-		localFile, fetchErr := fetchRemoteResource(ctx, cache, dir, entry.Value)
-		if fetchErr != nil {
-			return fmt.Errorf("remote resource %s: %w", entry.Value, fetchErr)
-		}
-		entry.Value = "./" + localFile
+		entry.Value = "./" + localRef
 		entry.Tag = "!!str"
 		entry.Style = 0 // plain scalar; preserve other entries' styles
 		changed = true

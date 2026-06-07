@@ -84,6 +84,9 @@ type StagingCache struct {
 	// re-fetches the same URL and re-emits the same WARN line.
 	remoteFetches sync.Map // url string -> *remoteFetch
 
+	// gitClones dedupes git remote base clones across preflight passes.
+	gitClones sync.Map // cloneKey string -> *gitClone
+
 	// sizes memoizes each completed stage's byte size by directory path
 	// for the LRU sweep, which needs the per-stage size to enforce the
 	// cap. A completed stage is content-addressed and effectively
@@ -388,6 +391,17 @@ func (c *StagingCache) Close() error {
 		}
 		delete(c.stages, key)
 	}
+	// Wait for in-flight clones the same way the stage loop above
+	// blocks on s.once() — the clone goroutine is bounded by
+	// gitCloneTimeout, so this can't hang.
+	c.gitClones.Range(func(_, v any) bool {
+		gc := v.(*gitClone)
+		<-gc.done
+		if gc.err == nil && gc.dir != "" {
+			errs = append(errs, os.RemoveAll(gc.dir))
+		}
+		return true
+	})
 	return errors.Join(errs...)
 }
 
